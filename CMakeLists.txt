@@ -1,22 +1,28 @@
 cmake_minimum_required(VERSION 3.22)
+
+# Root build script for DOOF — configures the plugin target, unit-test target,
+# and links JUCE as a subdirectory dependency.
 project(DOOF VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Pull in JUCE from the local submodule so the build is fully self-contained.
 add_subdirectory(JUCE)
 
 # ─── Plugin target ────────────────────────────────────────────────────────────
+# Main plugin artefact: builds VST3 and Standalone formats.
+# IS_SYNTH + NEEDS_MIDI_INPUT configure JUCE's bus/MIDI plumbing for a synth.
 juce_add_plugin(DOOF
     VERSION                     "0.1.0"
     COMPANY_NAME                "EfrainCuessy"
     BUNDLE_ID                   "com.efraincuessy.doof"
-    PLUGIN_MANUFACTURER_CODE    ECsy        # unique 4-char manufacturer code
-    PLUGIN_CODE                 Doof        # unique 4-char plugin code
+    PLUGIN_MANUFACTURER_CODE    ECsy        # 4-char manufacturer code registered with Steinberg
+    PLUGIN_CODE                 Doof        # 4-char plugin code, unique per product
     FORMATS                     VST3 Standalone
     PRODUCT_NAME                "DOOF"
-    IS_SYNTH                    TRUE
-    NEEDS_MIDI_INPUT            TRUE
+    IS_SYNTH                    TRUE        # declares main bus as a synth (no audio input required)
+    NEEDS_MIDI_INPUT            TRUE        # plugin receives MIDI notes to trigger the engine
     NEEDS_MIDI_OUTPUT           FALSE
     IS_MIDI_EFFECT              FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
@@ -24,12 +30,17 @@ juce_add_plugin(DOOF
     VST3_CATEGORIES             "Instrument|Synth"
 )
 
+# Source files compiled into the plugin target.
 target_sources(DOOF
     PRIVATE
-        src/PluginProcessor.cpp
-        src/PluginEditor.cpp
+        src/PluginProcessor.cpp   # audio engine + JUCE AudioProcessor boilerplate
+        src/PluginEditor.cpp      # GUI root + JUCE AudioProcessorEditor boilerplate
+        src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
 )
 
+# Compile-time definitions applied to the plugin target.
+# WEB_BROWSER and CURL disabled to reduce binary size and avoid unnecessary dependencies.
+# VST3_CAN_REPLACE_VST2 disabled because DOOF has no VST2 heritage.
 target_compile_definitions(DOOF
     PUBLIC
         JUCE_WEB_BROWSER=0
@@ -37,6 +48,9 @@ target_compile_definitions(DOOF
         JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
+# Link JUCE modules needed by the plugin.
+# juce_audio_utils provides AudioProcessor, AudioProcessorEditor, and related helpers.
+# juce_dsp provides the DSP toolkit used by the engine (oscillators, filters, FFT, etc.).
 target_link_libraries(DOOF
     PRIVATE
         juce::juce_audio_utils
@@ -47,9 +61,21 @@ target_link_libraries(DOOF
 )
 
 # ─── Unit tests ───────────────────────────────────────────────────────────────
+# Headless console app that runs all juce::UnitTest subclasses via CTest.
+# Each phase adds its own test cases; all test files are listed here.
 juce_add_console_app(DOOFTests PRODUCT_NAME "DOOFTests")
 
-target_sources(DOOFTests PRIVATE tests/BasicTests.cpp)
+# Test source files.
+# SubVoice.cpp is included so Phase 1 tests can instantiate SubVoice directly,
+# without pulling in the full plugin target and its audio_utils/dsp dependencies.
+target_sources(DOOFTests
+    PRIVATE
+        tests/BasicTests.cpp  # Phase 0 sanity test + Phase 1 SubVoice verify tests
+        src/SubVoice.cpp      # voice engine under test (juce_core only, no audio_utils)
+)
+
+# Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
+target_include_directories(DOOFTests PRIVATE src)
 
 target_compile_definitions(DOOFTests
     PRIVATE
@@ -57,6 +83,9 @@ target_compile_definitions(DOOFTests
         JUCE_USE_CURL=0
 )
 
+# Link only juce_core for the test runner.
+# SubVoice uses juce::MathConstants and juce::ignoreUnused, both from juce_core.
+# Add juce_audio_basics or juce_dsp here when later test phases need them.
 target_link_libraries(DOOFTests
     PRIVATE
         juce::juce_core
@@ -64,5 +93,6 @@ target_link_libraries(DOOFTests
         juce::juce_recommended_warning_flags
 )
 
+# Register the test binary with CTest so `ctest` discovers and runs it automatically.
 enable_testing()
 add_test(NAME BasicTests COMMAND DOOFTests)

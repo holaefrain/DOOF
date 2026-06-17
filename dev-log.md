@@ -20,8 +20,8 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 
 | Phase | Name | Status | Verify passed? |
 |---|---|---|---|
-| 0 | Project scaffolding | Not started | — |
-| 1 | Engine skeleton + one audible sub | Not started | — |
+| 0 | Project scaffolding | Complete | ✅ |
+| 1 | Engine skeleton + one audible sub | Complete | ✅ |
 | 2 | Node-based envelope engine | Not started | — |
 | 3 | Envelope canvas (GUI) + minimal preset save/load | Not started | — |
 | 4 | Layers + mixer | Not started | — |
@@ -54,6 +54,45 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 ---
 
 ## Sessions
+
+---
+
+### Session 2026-06-16
+
+**Goal:** Phase 0 verification + Phase 1 build.
+
+**Phase 0 verified:**
+- CMake builds VST3, Standalone, and DOOFTests targets cleanly.
+- `ctest` passes (sanity test green).
+- Phase 0 verify criteria all met before advancing.
+
+**Phase 1 built:**
+
+New files:
+- `src/SubVoice.h` / `src/SubVoice.cpp` — monophonic sine voice with hardcoded pitch+amp envelopes and choke-on-retrigger (5 ms linear anti-click fade). State machine: Idle → Playing → Choking → Playing.
+- `src/SubVoice.cpp` added to both the plugin target and the `DOOFTests` target.
+
+Updated files:
+- `PluginProcessor.h/.cpp` — APVTS wired (`sub.gain`, stable ID `"sub.gain"`); `prepareToPlay` prepares the voice and computes the DC blocker coefficient from the actual sample rate; `processBlock` iterates MIDI for note-ons, ticks the voice, applies gain + DC blocker, writes mono output to L+R.
+- `getStateInformation` / `setStateInformation` now serialise/restore APVTS state as XML.
+- `tests/BasicTests.cpp` — four Phase 1 verify tests added (RMS decay, pitch falls over time via zero-crossing, no NaN/Inf, no large jump at choke).
+
+**Bugs found and fixed during Phase 1:**
+
+1. **Immediate-idle bug** — `ampAt(0) = 0.0` (linear attack starts at zero), which was below `kIdleThreshold = 1e-4`, causing the voice to kill itself on the very first sample. Fix: guard the idle check with `envTime >= kAmpAttackSec`.
+
+2. **Zero-crossing test window mismatch** — early window was 20 ms but late window was 50 ms. At lower frequency, the extra samples compensated and crossing counts were approximately equal. Fix: both windows set to equal 20 ms duration; early 2–22 ms (~150 Hz), late 200–220 ms (~58 Hz).
+
+3. **Late-RMS threshold too tight** — original `lateRms < 0.02` at 500–1000 ms fails because the amp at 500 ms is still ~0.24. Fix: extended render to 3 s and used 2.5–3 s as the late window, where amp ≈ 2–8 × 10⁻⁴.
+
+**Decisions made this session:**
+- Block-accurate MIDI processing for Phase 1 (all events handled at block start, not sample-accurate). Sample-accurate triggering deferred to a later phase.
+- DC blocker cutoff ~10 Hz, coefficient computed from actual sample rate in `prepareToPlay`.
+- `sub.gain` is the first stable APVTS parameter (ID `"sub.gain"`, version 1).
+
+**Verify result:** All 4 Phase 1 assertions green. Plugin and Standalone build clean with zero warnings.
+
+**Next steps:** Phase 2 — node-based envelope engine (ValueTree data model, Bezier evaluator precomputed to lookup table, immutable atomic-pointer snapshot to audio thread).
 
 ---
 
