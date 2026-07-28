@@ -1,6 +1,7 @@
 #include <juce_core/juce_core.h>
 #include "SubVoice.h"
 #include "EnvelopeModel.h"
+#include "EnvelopeEvaluator.h"
 
 #include <cmath>
 #include <vector>
@@ -423,6 +424,171 @@ private:
 };
 
 static EnvelopeModelTest envelopeModelTest;
+
+// EnvelopeEvaluatorTest — automated verification of EnvelopeEvaluator::buildTable
+// per Phase 2 §6 criteria:
+//   - known node sets produce sampled values matching hand-computed expectations.
+//   - the curve is continuous (no jump) across node boundaries.
+//   - add/move/delete a node changes the rebuilt table.
+class EnvelopeEvaluatorTest : public juce::UnitTest
+{
+public:
+    EnvelopeEvaluatorTest() : juce::UnitTest("EnvelopeEvaluator") {}
+
+    void runTest() override
+    {
+        testEmptyModelIsSilent();
+        testSingleNodeHoldsFlat();
+        testLinearSegmentMatchesHandComputedValues();
+        testHoldBeforeFirstAndAfterLastNode();
+        testContinuityAtNodeBoundaries();
+        testTableChangesOnAddMoveDelete();
+    }
+
+private:
+    static constexpr double kDt = EnvelopeEvaluator::kTableDomainSeconds
+                                 / (double) EnvelopeEvaluator::kTableSize;
+
+    // Index of the table sample at or immediately after the given time.
+    static int indexAt(double time) { return (int) std::ceil(time / kDt); }
+
+    static bool tablesEqual(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        if (a.size() != b.size())
+            return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::abs(a[i] - b[i]) > 1.0e-6f)
+                return false;
+        return true;
+    }
+
+    // (a) A model with no nodes produces an all-zero (silent) table.
+    void testEmptyModelIsSilent()
+    {
+        beginTest("(a) Empty model produces an all-zero table");
+
+        EnvelopeModel model;
+        auto table = EnvelopeEvaluator::buildTable(model);
+
+        expectEquals((int) table.size(), EnvelopeEvaluator::kTableSize);
+        for (float v : table)
+            expectWithinAbsoluteError(v, 0.0f, 1.0e-9f);
+    }
+
+    // (b) A single-node model holds that node's value across the whole table.
+    void testSingleNodeHoldsFlat()
+    {
+        beginTest("(b) Single-node model holds flat at that value");
+
+        EnvelopeModel model;
+        model.addNode(1.0, 0.7);
+        auto table = EnvelopeEvaluator::buildTable(model);
+
+        expectWithinAbsoluteError(table[0],    0.7f, 1.0e-6f);
+        expectWithinAbsoluteError(table[512],  0.7f, 1.0e-6f);
+        expectWithinAbsoluteError(table[1024], 0.7f, 1.0e-6f);
+        expectWithinAbsoluteError(table[4095], 0.7f, 1.0e-6f);
+    }
+
+    // (c) An exactly-linear segment (control points on the straight line)
+    // produces sampled values matching value == time, hand-computed at a few
+    // known indices, with the hold beginning exactly at the last node's index.
+    void testLinearSegmentMatchesHandComputedValues()
+    {
+        beginTest("(c) Linear segment matches hand-computed values");
+
+        EnvelopeModel model;
+        model.addNode(0.0, 0.0);
+        model.addNode(1.0, 1.0);
+        model.setControlPoints(0, 1.0 / 3, 1.0 / 3, 0.0, 0.0);
+        model.setControlPoints(1, 1.0, 1.0, 2.0 / 3, 2.0 / 3);
+
+        auto table = EnvelopeEvaluator::buildTable(model);
+
+        expectWithinAbsoluteError(table[0],    0.0f,        1.0e-6f);
+        expectWithinAbsoluteError(table[512],  0.5f,        1.0e-6f); // t = 0.5
+        expectWithinAbsoluteError(table[1023], 0.999023f,   1.0e-5f); // t = 1023/4096*4
+        expectWithinAbsoluteError(table[1024], 1.0f,        1.0e-6f); // t = 1.0, hold begins
+        expectWithinAbsoluteError(table[4095], 1.0f,        1.0e-6f); // still holding
+    }
+
+    // (d) Time before the first node holds at the first node's value; time
+    // after the last node holds at the last node's value.
+    void testHoldBeforeFirstAndAfterLastNode()
+    {
+        beginTest("(d) Holds flat before the first node and after the last node");
+
+        EnvelopeModel model;
+        model.addNode(1.0, 0.2);
+        model.addNode(2.0, 0.8);
+
+        auto table = EnvelopeEvaluator::buildTable(model);
+
+        const int firstIndex = indexAt(1.0); // 1024
+        const int lastIndex  = indexAt(2.0); // 2048
+
+        expectWithinAbsoluteError(table[0],                          0.2f, 1.0e-6f);
+        expectWithinAbsoluteError(table[(size_t) firstIndex - 1],    0.2f, 1.0e-6f);
+        expectWithinAbsoluteError(table[(size_t) lastIndex],         0.8f, 1.0e-6f);
+        expectWithinAbsoluteError(table[4095],                       0.8f, 1.0e-6f);
+    }
+
+    // (e) At each internal node boundary, the table value on either side of
+    // the boundary index matches that node's own value closely — no jump
+    // from an index-arithmetic error between adjacent segments.
+    void testContinuityAtNodeBoundaries()
+    {
+        beginTest("(e) No jump at node boundaries between differently-shaped segments");
+
+        EnvelopeModel model;
+        model.addNode(0.0, 0.0);
+        model.addNode(1.0, 0.5);
+        model.addNode(2.0, 1.0);
+        // Reshape each segment differently so a boundary bug can't hide behind
+        // both segments happening to agree by construction.
+        model.setControlPoints(0, 0.1, 0.9, 0.0, 0.0);
+        model.setControlPoints(1, 1.2, 0.6, 0.9, 0.1);
+        model.setControlPoints(2, 2.0, 1.0, 1.8, 0.4);
+
+        auto table = EnvelopeEvaluator::buildTable(model);
+
+        for (double nodeTime : { 1.0, 2.0 })
+        {
+            const int idx = indexAt(nodeTime);
+            const float expected = (nodeTime == 1.0) ? 0.5f : 1.0f;
+
+            expectWithinAbsoluteError(table[(size_t) idx],     expected, 0.01f);
+            expectWithinAbsoluteError(table[(size_t) idx - 1], expected, 0.01f);
+        }
+    }
+
+    // (f) Adding, moving, and deleting a node each change the rebuilt table.
+    void testTableChangesOnAddMoveDelete()
+    {
+        beginTest("(f) add/move/delete each change the rebuilt table");
+
+        EnvelopeModel model;
+        model.addNode(0.0, 0.0);
+        model.addNode(1.0, 1.0);
+        auto baseline = EnvelopeEvaluator::buildTable(model);
+
+        model.addNode(0.5, 0.9); // sharp spike in the middle of the segment
+        auto afterAdd = EnvelopeEvaluator::buildTable(model);
+        expect(!tablesEqual(baseline, afterAdd), "Adding a node should change the table");
+
+        model.moveNode(1, 0.5, 0.2); // move the spike node's value down
+        auto afterMove = EnvelopeEvaluator::buildTable(model);
+        expect(!tablesEqual(afterAdd, afterMove), "Moving a node should change the table");
+
+        model.deleteNode(1);
+        auto afterDelete = EnvelopeEvaluator::buildTable(model);
+        expect(!tablesEqual(afterMove, afterDelete), "Deleting a node should change the table");
+        expect(tablesEqual(baseline, afterDelete),
+               "Deleting the added node should restore the original table");
+    }
+};
+
+static EnvelopeEvaluatorTest envelopeEvaluatorTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 
