@@ -2,9 +2,12 @@
 #include "SubVoice.h"
 #include "EnvelopeModel.h"
 #include "EnvelopeEvaluator.h"
+#include "EnvelopePublisher.h"
 
 #include <cmath>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 // ── Phase 0 ───────────────────────────────────────────────────────────────────
 
@@ -590,12 +593,164 @@ private:
 
 static EnvelopeEvaluatorTest envelopeEvaluatorTest;
 
+// EnvelopePublisherTest — automated verification of EnvelopePublisher per
+// Phase 2 §6 criteria:
+//   - a concurrency test: one thread hammers edits while another spins
+//     reading the snapshot pointer; assert no crash and no torn/garbage
+//     reads. (Two deterministic single-threaded tests of the basic publish
+//     contract are included alongside, since the concurrency test alone
+//     doesn't pin down *what* should be published, only that it's safe.)
+//
+// Note on what this proves: a passing concurrency test demonstrates no
+// observed corruption across many iterations on this machine, this run — it
+// is not a formal proof of the absence of a data race. Real assurance for
+// that comes from running this binary under ThreadSanitizer, which is a
+// manual verification step outside what a unit test itself can do.
+class EnvelopePublisherTest : public juce::UnitTest
+{
+public:
+    EnvelopePublisherTest() : juce::UnitTest("EnvelopePublisher") {}
+
+    void runTest() override
+    {
+        testPublishesInitialSnapshot();
+        testRepublishesOnEdit();
+        testConcurrentEditsAndReads();
+    }
+
+private:
+    // (a) A freshly constructed publisher immediately has a non-null,
+    // all-zero (silent) snapshot — both models start out empty.
+    void testPublishesInitialSnapshot()
+    {
+        beginTest("(a) Publishes a non-null, silent initial snapshot");
+
+        EnvelopeModel pitchModel, ampModel;
+        EnvelopePublisher publisher(pitchModel, ampModel);
+
+        const auto* snap = publisher.getSnapshot();
+        expect(snap != nullptr, "Initial snapshot should never be null");
+        expectEquals((int) snap->pitchTable.size(), EnvelopeEvaluator::kTableSize);
+        expectEquals((int) snap->ampTable.size(),   EnvelopeEvaluator::kTableSize);
+        expectWithinAbsoluteError(snap->pitchTable[0], 0.0f, 1.0e-9f);
+        expectWithinAbsoluteError(snap->ampTable[0],   0.0f, 1.0e-9f);
+    }
+
+    // (b) Editing either model synchronously republishes: the pointer changes
+    // and the new snapshot's tables reflect the edit.
+    void testRepublishesOnEdit()
+    {
+        beginTest("(b) Editing a model republishes a new snapshot reflecting the edit");
+
+        EnvelopeModel pitchModel, ampModel;
+        EnvelopePublisher publisher(pitchModel, ampModel);
+        const auto* initial = publisher.getSnapshot();
+
+        pitchModel.addNode(0.0, 100.0);
+        const auto* afterPitchEdit = publisher.getSnapshot();
+        expect(afterPitchEdit != initial, "Snapshot pointer should change after a pitch edit");
+        expectWithinAbsoluteError(afterPitchEdit->pitchTable[0], 100.0f, 1.0e-3f);
+
+        ampModel.addNode(0.0, 0.5);
+        const auto* afterAmpEdit = publisher.getSnapshot();
+        expect(afterAmpEdit != afterPitchEdit, "Snapshot pointer should change after an amp edit");
+        expectWithinAbsoluteError(afterAmpEdit->ampTable[0], 0.5f, 1.0e-3f);
+        // The pitch table carries over unaffected by the amp-only edit.
+        expectWithinAbsoluteError(afterAmpEdit->pitchTable[0], 100.0f, 1.0e-3f);
+    }
+
+    // (c) One thread hammers add/move/delete edits on both models while
+    // another spins on getSnapshot(), reading table values every iteration.
+    // Passes if every observed value stays finite across many iterations.
+    void testConcurrentEditsAndReads()
+    {
+        beginTest("(c) Concurrent edits and reads: no crash, no non-finite values");
+
+        static constexpr int kNumEdits = 3000;
+
+        EnvelopeModel pitchModel, ampModel;
+        EnvelopePublisher publisher(pitchModel, ampModel);
+
+        std::atomic<bool> writerDone { false };
+        std::atomic<bool> sawBadValue { false };
+        std::atomic<int>  readIterations { 0 };
+
+        std::thread reader([&]
+        {
+            while (!writerDone.load(std::memory_order_acquire))
+            {
+                const auto* snap = publisher.getSnapshot();
+                if (snap == nullptr)
+                {
+                    sawBadValue.store(true, std::memory_order_relaxed);
+                    break;
+                }
+
+                for (int idx : { 0, 500, 1024, 2048, 4095 })
+                {
+                    const float pv = snap->pitchTable[(size_t) idx];
+                    const float av = snap->ampTable[(size_t) idx];
+                    if (!std::isfinite(pv) || !std::isfinite(av))
+                    {
+                        sawBadValue.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                }
+
+                readIterations.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+
+        // Writer: cycles add/move/delete, keeping pitch and amp models in
+        // lockstep (same sequence of calls) so node indices stay valid for both.
+        int numNodes = 0;
+        for (int i = 0; i < kNumEdits; ++i)
+        {
+            const int op = i % 3;
+            if (op == 0 || numNodes == 0)
+            {
+                pitchModel.addNode((double) i * 0.0001, (double) (i % 100));
+                ampModel.addNode((double) i * 0.0001, (double) (i % 50) * 0.01);
+                ++numNodes;
+            }
+            else if (op == 1)
+            {
+                const int idx = i % numNodes;
+                pitchModel.moveNode(idx, (double) i * 0.0001 + 0.5, (double) (i % 77));
+                ampModel.moveNode(idx, (double) i * 0.0001 + 0.5, (double) (i % 33) * 0.01);
+            }
+            else
+            {
+                const int idx = i % numNodes;
+                pitchModel.deleteNode(idx);
+                ampModel.deleteNode(idx);
+                --numNodes;
+            }
+        }
+
+        writerDone.store(true, std::memory_order_release);
+        reader.join();
+
+        expect(!sawBadValue.load(), "Reader observed a non-finite value in a published snapshot");
+        expect(readIterations.load() > 0, "Reader thread should have completed at least one read");
+    }
+};
+
+static EnvelopePublisherTest envelopePublisherTest;
+
 // ── Test runner entry point ────────────────────────────────────────────────────
 
 // Runs all registered juce::UnitTest subclasses and returns a non-zero exit code
 // on any failure so CTest reports the test as failed.
+//
+// ScopedJuceInitialiser_GUI creates (and, on scope exit, tears down) the
+// juce::MessageManager singleton. EnvelopePublisher's retirement mechanism
+// uses juce::Timer, which asserts a MessageManager exists — this is JUCE's
+// own documented pattern for console apps that touch such classes.
 int main()
 {
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
     juce::UnitTestRunner runner;
     runner.runAllTests();
 
