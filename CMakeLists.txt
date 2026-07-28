@@ -6,6 +6,7 @@ project(DOOF VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Pull in JUCE from the local submodule so the build is fully self-contained.
 add_subdirectory(JUCE)
@@ -36,6 +37,7 @@ target_sources(DOOF
         src/PluginProcessor.cpp   # audio engine + JUCE AudioProcessor boilerplate
         src/PluginEditor.cpp      # GUI root + JUCE AudioProcessorEditor boilerplate
         src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
+        src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -55,6 +57,7 @@ target_link_libraries(DOOF
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        juce::juce_data_structures  # ValueTree + UndoManager, used by EnvelopeModel
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
@@ -66,12 +69,13 @@ target_link_libraries(DOOF
 juce_add_console_app(DOOFTests PRODUCT_NAME "DOOFTests")
 
 # Test source files.
-# SubVoice.cpp is included so Phase 1 tests can instantiate SubVoice directly,
-# without pulling in the full plugin target and its audio_utils/dsp dependencies.
+# SubVoice.cpp and EnvelopeModel.cpp are included so tests can instantiate them
+# directly, without pulling in the full plugin target and its audio_utils/dsp deps.
 target_sources(DOOFTests
     PRIVATE
-        tests/BasicTests.cpp  # Phase 0 sanity test + Phase 1 SubVoice verify tests
-        src/SubVoice.cpp      # voice engine under test (juce_core only, no audio_utils)
+        tests/BasicTests.cpp   # Phase 0 sanity test + Phase 1 SubVoice verify tests
+        src/SubVoice.cpp       # voice engine under test (juce_core only, no audio_utils)
+        src/EnvelopeModel.cpp  # envelope data model under test (juce_data_structures)
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
@@ -83,12 +87,13 @@ target_compile_definitions(DOOFTests
         JUCE_USE_CURL=0
 )
 
-# Link only juce_core for the test runner.
 # SubVoice uses juce::MathConstants and juce::ignoreUnused, both from juce_core.
+# EnvelopeModel uses juce::ValueTree/UndoManager, from juce_data_structures.
 # Add juce_audio_basics or juce_dsp here when later test phases need them.
 target_link_libraries(DOOFTests
     PRIVATE
         juce::juce_core
+        juce::juce_data_structures
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
