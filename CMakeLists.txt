@@ -39,6 +39,7 @@ target_sources(DOOF
         src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
         src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
         src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
+        src/EnvelopeEvaluator.cpp # precomputes an EnvelopeModel into a lookup table
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -78,6 +79,7 @@ target_sources(DOOFTests
         src/SubVoice.cpp       # voice engine under test (juce_core only, no audio_utils)
         src/EnvelopeModel.cpp  # envelope data model under test (juce_data_structures)
         src/BezierSegment.cpp  # Bezier segment math under test (no JUCE dependency)
+        src/EnvelopeEvaluator.cpp # lookup-table builder under test
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
