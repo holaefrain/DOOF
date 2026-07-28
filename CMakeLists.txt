@@ -38,6 +38,7 @@ target_sources(DOOF
         src/PluginEditor.cpp      # GUI root + JUCE AudioProcessorEditor boilerplate
         src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
         src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
+        src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -73,9 +74,10 @@ juce_add_console_app(DOOFTests PRODUCT_NAME "DOOFTests")
 # directly, without pulling in the full plugin target and its audio_utils/dsp deps.
 target_sources(DOOFTests
     PRIVATE
-        tests/BasicTests.cpp   # Phase 0 sanity test + Phase 1 SubVoice verify tests
+        tests/BasicTests.cpp   # Phase 0/1/2 verify tests
         src/SubVoice.cpp       # voice engine under test (juce_core only, no audio_utils)
         src/EnvelopeModel.cpp  # envelope data model under test (juce_data_structures)
+        src/BezierSegment.cpp  # Bezier segment math under test (no JUCE dependency)
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
