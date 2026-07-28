@@ -40,6 +40,7 @@ target_sources(DOOF
         src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
         src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
         src/EnvelopeEvaluator.cpp # precomputes an EnvelopeModel into a lookup table
+        src/EnvelopePublisher.cpp # atomic-pointer snapshot publish path to the audio thread
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -60,6 +61,7 @@ target_link_libraries(DOOF
         juce::juce_audio_utils
         juce::juce_dsp
         juce::juce_data_structures  # ValueTree + UndoManager, used by EnvelopeModel
+        juce::juce_events           # juce::Timer, used by EnvelopePublisher
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
@@ -80,6 +82,7 @@ target_sources(DOOFTests
         src/EnvelopeModel.cpp  # envelope data model under test (juce_data_structures)
         src/BezierSegment.cpp  # Bezier segment math under test (no JUCE dependency)
         src/EnvelopeEvaluator.cpp # lookup-table builder under test
+        src/EnvelopePublisher.cpp # atomic-pointer publish path under test
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
@@ -93,11 +96,13 @@ target_compile_definitions(DOOFTests
 
 # SubVoice uses juce::MathConstants and juce::ignoreUnused, both from juce_core.
 # EnvelopeModel uses juce::ValueTree/UndoManager, from juce_data_structures.
+# EnvelopePublisher uses juce::Timer, from juce_events.
 # Add juce_audio_basics or juce_dsp here when later test phases need them.
 target_link_libraries(DOOFTests
     PRIVATE
         juce::juce_core
         juce::juce_data_structures
+        juce::juce_events
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )

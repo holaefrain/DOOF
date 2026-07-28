@@ -103,7 +103,7 @@ Updated files:
 **What happened:**
 - Read and internalized `project-reference.md` in full.
 - Set up persistent Claude memory for this project:
-  - `memory/feedback_read_project_reference.md` — reminder to read `project-reference.md` at the start of every session.
+  - `memory/feedback_read_project_architecture.md` — reminder to read `project-architecture.md` at the start of every session.
   - `memory/project_doof_overview.md` — DOOF overview, committed target (Phase 12), and key locked decisions.
   - `memory/MEMORY.md` — index.
 - Created this dev log (`dev-log.md`) as the running record of sessions and thought process.
