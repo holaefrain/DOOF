@@ -1,22 +1,32 @@
 #pragma once
 #include <juce_core/juce_core.h>
+#include "EnvelopeSnapshot.h"
 #include <cmath>
 
-// SubVoice — monophonic sine oscillator driven by hardcoded pitch and amp envelopes.
+// SubVoice — monophonic sine oscillator driven by table-based pitch and amp
+// envelopes (§2, §3.1 of project-architecture.md).
 //
-// Implements the Phase 1 voice: one sine oscillator that sweeps pitch from
-// kPitchStartHz down to kPitchEndHz, with a short linear attack and an
-// exponential amp decay.  A new note-on while the voice is active triggers
-// a short linear choke fade before the new body begins (anti-click retrigger).
+// The pitch and amp envelopes are read from an EnvelopeSnapshot handed in via
+// setSnapshot() — never a live EnvelopeModel/ValueTree (§2's cardinal rule:
+// the audio thread never touches the live tree). The snapshot pointer is
+// expected to be loaded once per block by the caller (PluginProcessor) and
+// held for the whole block; SubVoice itself just reads whatever pointer it
+// was last given.
 //
-// Phase 2 replaces the hardcoded envelopes with the node-based lookup-table
-// engine, but the state machine and choke logic here persist unchanged.
+// A new note-on while the voice is active triggers a short linear choke fade
+// before the new body begins (anti-click retrigger).
 class SubVoice
 {
 public:
     // Prepare the voice for playback at the given sample rate.
     // Must be called before any processSample() or noteOn() calls.
     void prepare(double sampleRate);
+
+    // Sets the envelope snapshot this voice reads from. Real-time safe: just
+    // stores a pointer, no allocation, no locking. Call once per block, before
+    // any processSample() calls for that block (§2: "loads that pointer once
+    // per block").
+    void setSnapshot(const EnvelopeSnapshot* snapshot) { currentSnapshot = snapshot; }
 
     // Trigger a new note.  If the voice is already playing, initiates the choke
     // fade and queues midiNote to start after the fade completes.
@@ -33,21 +43,12 @@ public:
 private:
     // ── Voice state machine ───────────────────────────────────────────────────
     // Idle:    silent; no CPU work done in processSample.
-    // Playing: running pitch + amp envelopes; transitions to Idle when amp falls
-    //          below kIdleThreshold, or to Choking on a new noteOn.
+    // Playing: running pitch + amp envelopes; transitions to Idle once amp has
+    //          risen above kIdleThreshold at least once and then falls back
+    //          below it, or to Choking on a new noteOn.
     // Choking: linear fade from the amplitude captured at choke-start down to 0
     //          over kChokeFadeSec; then transitions to Playing with the pending note.
     enum class State { Idle, Playing, Choking };
-
-    // ── Hardcoded Phase 1 envelope constants ─────────────────────────────────
-    // Pitch envelope: exponential sweep from kPitchStartHz to kPitchEndHz.
-    static constexpr double kPitchStartHz  = 150.0;  // frequency at note-on (Hz)
-    static constexpr double kPitchEndHz    =  50.0;  // asymptotic frequency after sweep (Hz)
-    static constexpr double kPitchDecaySec =  0.08;  // pitch sweep time constant (seconds)
-
-    // Amp envelope: brief linear attack then exponential decay.
-    static constexpr double kAmpAttackSec  = 0.002;  // linear ramp-up duration (seconds)
-    static constexpr double kAmpDecaySec   = 0.35;   // exponential decay time constant (seconds)
 
     // Choke fade: anti-click linear ramp-down on retrigger.
     static constexpr double kChokeFadeSec  = 0.005;  // choke fade duration (seconds)
@@ -59,11 +60,19 @@ private:
     double sampleRate  = 44100.0;
     State  state       = State::Idle;
 
+    const EnvelopeSnapshot* currentSnapshot = nullptr;
+
     // Sine oscillator: phase accumulator in [0, 2π).
     double phase = 0.0;
 
     // Elapsed time in the current Playing body; drives both pitch and amp envelopes.
     double envTime = 0.0;
+
+    // Set once amp has risen above kIdleThreshold since the current body
+    // started. Guards against an envelope whose amp starts at (or near) zero
+    // — e.g. a rising attack — from tripping the idle check before it's ever
+    // actually sounded, without assuming any fixed attack duration.
+    bool hasExceededIdleThreshold = false;
 
     // ── Choke state ───────────────────────────────────────────────────────────
     double chokeTimer = 0.0;   // time elapsed inside the choke fade (seconds)
@@ -73,12 +82,20 @@ private:
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    // Resets phase and envTime, stores the triggering note, enters Playing state.
+    // Resets phase, envTime, and the idle-threshold flag, stores the
+    // triggering note, enters Playing state.
     void startBody(int midiNote);
 
-    // Evaluates the pitch envelope at time t (seconds): exponential sweep.
+    // Evaluates the pitch envelope at time t (seconds) via currentSnapshot's
+    // pitch table. Returns 0.0 if no snapshot has been set yet.
     double pitchAt(double t) const;
 
-    // Evaluates the amp envelope at time t (seconds): linear attack then exp decay.
+    // Evaluates the amp envelope at time t (seconds) via currentSnapshot's
+    // amp table. Returns 0.0 if no snapshot has been set yet.
     double ampAt(double t) const;
+
+    // Linearly interpolated lookup into one of currentSnapshot's tables at
+    // absolute time t; clamps to the table's first/last entry outside its
+    // domain. currentSnapshot must be non-null when this is called.
+    double lookupTable(const std::vector<float>& table, double t) const;
 };

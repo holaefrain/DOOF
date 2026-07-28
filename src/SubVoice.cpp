@@ -8,6 +8,7 @@ void SubVoice::prepare(double sr)
     state       = State::Idle;
     phase       = 0.0;
     envTime     = 0.0;
+    hasExceededIdleThreshold = false;
     chokeTimer  = 0.0;
     chokeAmp    = 0.0;
     chokeFreq   = 0.0;
@@ -83,10 +84,14 @@ float SubVoice::processSample()
 
         envTime += dt;
 
+        if (amp >= kIdleThreshold)
+            hasExceededIdleThreshold = true;
+
         // Transition to Idle once the tail has decayed to inaudible levels.
-        // The envTime guard prevents the attack phase (where amp starts at 0.0)
-        // from satisfying the threshold and killing the voice before it starts.
-        if (envTime >= kAmpAttackSec && amp < kIdleThreshold)
+        // hasExceededIdleThreshold guards against an envelope that starts at
+        // (or near) zero from satisfying the threshold and killing the voice
+        // before it's ever actually sounded.
+        if (hasExceededIdleThreshold && amp < kIdleThreshold)
             state = State::Idle;
     }
 
@@ -95,30 +100,52 @@ float SubVoice::processSample()
 
 // ── Private helpers ────────────────────────────────────────────────────────────
 
-// Exponential frequency sweep: starts at kPitchStartHz and decays toward kPitchEndHz.
-// The decay rate is set by kPitchDecaySec (one time constant).
+// Reads the pitch envelope at time t from currentSnapshot's pitch table.
 double SubVoice::pitchAt(double t) const
 {
-    return kPitchEndHz + (kPitchStartHz - kPitchEndHz) * std::exp(-t / kPitchDecaySec);
+    if (currentSnapshot == nullptr)
+        return 0.0;
+    return lookupTable(currentSnapshot->pitchTable, t);
 }
 
-// Amp envelope: linear ramp over kAmpAttackSec (prevents a hard click at note-on),
-// followed by an exponential decay toward silence.
+// Reads the amp envelope at time t from currentSnapshot's amp table.
 double SubVoice::ampAt(double t) const
 {
-    if (t < kAmpAttackSec)
-        return t / kAmpAttackSec;                                   // linear attack
-    return std::exp(-(t - kAmpAttackSec) / kAmpDecaySec);          // exponential decay
+    if (currentSnapshot == nullptr)
+        return 0.0;
+    return lookupTable(currentSnapshot->ampTable, t);
 }
 
-// Reset the oscillator and envelope timer, then enter Playing state.
-// Phase is set to 0 so sin(0)=0; combined with the linear attack this
-// gives a smooth (click-free) start even if the caller skips the choke.
+// Linearly interpolated lookup into one of currentSnapshot's tables at
+// absolute time t. Clamps to the table's first/last entry outside its domain
+// (matches EnvelopeEvaluator::buildTable's own hold-flat-at-the-ends behaviour).
+double SubVoice::lookupTable(const std::vector<float>& table, double t) const
+{
+    const double dt = currentSnapshot->tableDomainSeconds / (double) currentSnapshot->tableSize;
+    const double index = t / dt;
+
+    if (index <= 0.0)
+        return (double) table[0];
+
+    const int lastIndex = currentSnapshot->tableSize - 1;
+    if (index >= (double) lastIndex)
+        return (double) table[(size_t) lastIndex];
+
+    const int i0 = (int) index;
+    const double frac = index - (double) i0;
+    return (double) table[(size_t) i0] * (1.0 - frac) + (double) table[(size_t) i0 + 1] * frac;
+}
+
+// Reset the oscillator, envelope timer, and idle-threshold flag, then enter
+// Playing state. Phase is set to 0 so sin(0)=0; combined with an envelope
+// whose amp starts near zero, this gives a smooth (click-free) start even if
+// the caller skips the choke.
 // midiNote is stored for future keytracking (Phase 6); not used for pitch yet.
 void SubVoice::startBody(int midiNote)
 {
     juce::ignoreUnused(midiNote); // keytracking added in Phase 6
     phase   = 0.0;
     envTime = 0.0;
+    hasExceededIdleThreshold = false;
     state   = State::Playing;
 }
