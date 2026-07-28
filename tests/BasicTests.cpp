@@ -1,5 +1,6 @@
 #include <juce_core/juce_core.h>
 #include "SubVoice.h"
+#include "EnvelopeModel.h"
 
 #include <cmath>
 #include <vector>
@@ -210,6 +211,218 @@ private:
 };
 
 static Phase1VoiceTest phase1VoiceTest;
+
+// ── Phase 2 ───────────────────────────────────────────────────────────────────
+
+// EnvelopeModelTest — automated verification of EnvelopeModel per Phase 2 §6 criteria:
+//   - add/move/delete nodes and assert the tree reflects it, in time order.
+//   - serialize -> deserialize and assert identical state.
+//   - undo/redo a sequence of edits and assert node state matches expectations
+//     at each step.
+class EnvelopeModelTest : public juce::UnitTest
+{
+public:
+    EnvelopeModelTest() : juce::UnitTest("EnvelopeModel") {}
+
+    void runTest() override
+    {
+        testAddNodeOrdering();
+        testAddNodeDefaultControlPoints();
+        testMoveNode();
+        testMoveNodeResort();
+        testDeleteNode();
+        testSetControlPoints();
+        testSerializeRoundTrip();
+        testUndoRedoAddMoveDelete();
+    }
+
+private:
+    // Compares two Node values (set from exact doubles in these tests, so
+    // near-equality is expected; a tight tolerance absorbs any float slack).
+    static void expectNodeEquals(juce::UnitTest& t, const EnvelopeModel::Node& a,
+                                                     const EnvelopeModel::Node& b)
+    {
+        t.expectWithinAbsoluteError(a.time,       b.time,       1.0e-9);
+        t.expectWithinAbsoluteError(a.value,      b.value,      1.0e-9);
+        t.expectWithinAbsoluteError(a.cpOutTime,  b.cpOutTime,  1.0e-9);
+        t.expectWithinAbsoluteError(a.cpOutValue, b.cpOutValue, 1.0e-9);
+        t.expectWithinAbsoluteError(a.cpInTime,   b.cpInTime,   1.0e-9);
+        t.expectWithinAbsoluteError(a.cpInValue,  b.cpInValue,  1.0e-9);
+    }
+
+    // (a) Nodes added out of time order end up sorted ascending by time.
+    void testAddNodeOrdering()
+    {
+        beginTest("(a) addNode keeps nodes ordered by time");
+
+        EnvelopeModel model;
+        model.addNode(0.10, 1.0);
+        model.addNode(0.00, 0.0);
+        model.addNode(0.05, 0.5);
+
+        expectEquals(model.getNumNodes(), 3);
+        expectWithinAbsoluteError(model.getNode(0).time, 0.00, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(1).time, 0.05, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(2).time, 0.10, 1.0e-9);
+    }
+
+    // (b) A freshly added node's control points default to coincident with the
+    // node itself (the "gently-eased default" documented in EnvelopeModel.h).
+    void testAddNodeDefaultControlPoints()
+    {
+        beginTest("(b) addNode defaults control points to the node's own position");
+
+        EnvelopeModel model;
+        model.addNode(0.25, 0.75);
+        auto n = model.getNode(0);
+
+        expectWithinAbsoluteError(n.cpOutTime,  n.time,  1.0e-9);
+        expectWithinAbsoluteError(n.cpOutValue, n.value, 1.0e-9);
+        expectWithinAbsoluteError(n.cpInTime,   n.time,  1.0e-9);
+        expectWithinAbsoluteError(n.cpInValue,  n.value, 1.0e-9);
+    }
+
+    // (c) Moving a node shifts its control points by the same delta, so the
+    // curve shape travels with the node rather than being left behind.
+    void testMoveNode()
+    {
+        beginTest("(c) moveNode shifts control points by the same delta");
+
+        EnvelopeModel model;
+        model.addNode(0.10, 0.50);
+        model.setControlPoints(0, 0.05, 0.40, 0.15, 0.60); // reshape away from defaults
+
+        const int newIndex = model.moveNode(0, 0.20, 0.80); // +0.10 time, +0.30 value
+        expectEquals(newIndex, 0);
+
+        auto n = model.getNode(0);
+        expectWithinAbsoluteError(n.time,       0.20, 1.0e-9);
+        expectWithinAbsoluteError(n.value,      0.80, 1.0e-9);
+        expectWithinAbsoluteError(n.cpOutTime,  0.15, 1.0e-9); // 0.05 + 0.10
+        expectWithinAbsoluteError(n.cpOutValue, 0.70, 1.0e-9); // 0.40 + 0.30
+        expectWithinAbsoluteError(n.cpInTime,   0.25, 1.0e-9); // 0.15 + 0.10
+        expectWithinAbsoluteError(n.cpInValue,  0.90, 1.0e-9); // 0.60 + 0.30
+    }
+
+    // (d) Moving a node past a neighbour re-sorts it into the correct index.
+    void testMoveNodeResort()
+    {
+        beginTest("(d) moveNode re-sorts when crossing a neighbour's time");
+
+        EnvelopeModel model;
+        model.addNode(0.00, 0.0); // index 0
+        model.addNode(0.10, 1.0); // index 1
+        model.addNode(0.20, 2.0); // index 2
+
+        const int newIndex = model.moveNode(0, 0.30, 3.0); // move first node past the last
+        expectEquals(newIndex, 2);
+        expectEquals(model.getNumNodes(), 3);
+
+        expectWithinAbsoluteError(model.getNode(0).time, 0.10, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(1).time, 0.20, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(2).time, 0.30, 1.0e-9);
+    }
+
+    // (e) Deleting a node removes exactly that node and keeps the rest ordered.
+    void testDeleteNode()
+    {
+        beginTest("(e) deleteNode removes the targeted node");
+
+        EnvelopeModel model;
+        model.addNode(0.00, 0.0);
+        model.addNode(0.10, 1.0);
+        model.addNode(0.20, 2.0);
+
+        model.deleteNode(1); // remove the middle node
+
+        expectEquals(model.getNumNodes(), 2);
+        expectWithinAbsoluteError(model.getNode(0).time, 0.00, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(1).time, 0.20, 1.0e-9);
+    }
+
+    // (f) setControlPoints reshapes a curve without moving the node itself.
+    void testSetControlPoints()
+    {
+        beginTest("(f) setControlPoints reshapes independent of node position");
+
+        EnvelopeModel model;
+        model.addNode(0.10, 0.50);
+        model.setControlPoints(0, 0.02, 0.10, 0.18, 0.90);
+
+        auto n = model.getNode(0);
+        expectWithinAbsoluteError(n.time,  0.10, 1.0e-9); // unchanged
+        expectWithinAbsoluteError(n.value, 0.50, 1.0e-9); // unchanged
+        expectWithinAbsoluteError(n.cpOutTime,  0.02, 1.0e-9);
+        expectWithinAbsoluteError(n.cpOutValue, 0.10, 1.0e-9);
+        expectWithinAbsoluteError(n.cpInTime,   0.18, 1.0e-9);
+        expectWithinAbsoluteError(n.cpInValue,  0.90, 1.0e-9);
+    }
+
+    // (g) Serializing to XML and back (the same path getStateInformation/
+    // setStateInformation use in PluginProcessor) reproduces identical state.
+    void testSerializeRoundTrip()
+    {
+        beginTest("(g) Serialize -> deserialize reproduces identical state");
+
+        EnvelopeModel original;
+        original.addNode(0.00, 0.0);
+        original.addNode(0.10, 1.0);
+        original.setControlPoints(1, 0.05, 0.20, 0.15, 0.90);
+        original.addNode(0.20, 0.5);
+
+        std::unique_ptr<juce::XmlElement> xml(original.getValueTree().createXml());
+        auto restoredTree = juce::ValueTree::fromXml(*xml);
+
+        EnvelopeModel restored;
+        restored.setState(restoredTree);
+
+        expectEquals(restored.getNumNodes(), original.getNumNodes());
+        for (int i = 0; i < original.getNumNodes(); ++i)
+            expectNodeEquals(*this, restored.getNode(i), original.getNode(i));
+    }
+
+    // (h) undo/redo walks back and forward through add/move/delete edits,
+    // checking node state after every step.
+    void testUndoRedoAddMoveDelete()
+    {
+        beginTest("(h) undo/redo restores state at each step");
+
+        EnvelopeModel model;
+
+        model.addNode(0.00, 0.0);              // T1
+        expectEquals(model.getNumNodes(), 1);
+
+        model.addNode(0.10, 1.0);              // T2
+        expectEquals(model.getNumNodes(), 2);
+
+        model.moveNode(0, 0.05, 0.5);           // T3
+        expectWithinAbsoluteError(model.getNode(0).time, 0.05, 1.0e-9);
+
+        model.deleteNode(1);                    // T4
+        expectEquals(model.getNumNodes(), 1);
+
+        model.undo(); // undo T4 -> node 1 comes back
+        expectEquals(model.getNumNodes(), 2);
+
+        model.undo(); // undo T3 -> the moved node goes back to time 0.00
+        expectWithinAbsoluteError(model.getNode(0).time, 0.00, 1.0e-9);
+
+        model.undo(); // undo T2 -> back to one node
+        expectEquals(model.getNumNodes(), 1);
+
+        model.undo(); // undo T1 -> back to empty
+        expectEquals(model.getNumNodes(), 0);
+
+        model.redo(); // redo T1
+        model.redo(); // redo T2
+        model.redo(); // redo T3
+        model.redo(); // redo T4
+        expectEquals(model.getNumNodes(), 1);
+        expectWithinAbsoluteError(model.getNode(0).time, 0.05, 1.0e-9);
+    }
+};
+
+static EnvelopeModelTest envelopeModelTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 
