@@ -41,6 +41,7 @@ target_sources(DOOF
         src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
         src/EnvelopeEvaluator.cpp # precomputes an EnvelopeModel into a lookup table
         src/EnvelopePublisher.cpp # atomic-pointer snapshot publish path to the audio thread
+        src/DefaultEnvelopes.cpp  # out-of-the-box pitch/amp envelope shapes
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -83,6 +84,7 @@ target_sources(DOOFTests
         src/BezierSegment.cpp  # Bezier segment math under test (no JUCE dependency)
         src/EnvelopeEvaluator.cpp # lookup-table builder under test
         src/EnvelopePublisher.cpp # atomic-pointer publish path under test
+        src/DefaultEnvelopes.cpp # out-of-the-box envelope shapes, shared with production
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.

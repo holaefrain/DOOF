@@ -55,9 +55,12 @@ public:
     };
 
     // Inserts a new node at (time, value), keeping nodes ordered by time.
-    // Control points default to coincident with the node itself, giving a
-    // gently-eased default curve until reshaped via setControlPoints().
-    // One undo step. Returns the node's index after insertion.
+    // Control points default to coincident with the node itself. When both a
+    // segment's start-node cpOut and end-node cpIn are coincident like this,
+    // time and value are both the same (nonlinear) function of the Bezier
+    // parameter, and that function cancels out when eliminated between them —
+    // so the segment is exactly linear in time until reshaped via
+    // setControlPoints(). One undo step. Returns the node's index after insertion.
     int addNode(double time, double value);
 
     // Moves the node at index to (newTime, newValue). Its control points

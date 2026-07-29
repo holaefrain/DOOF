@@ -3,6 +3,7 @@
 #include "EnvelopeModel.h"
 #include "EnvelopeEvaluator.h"
 #include "EnvelopePublisher.h"
+#include "DefaultEnvelopes.h"
 
 #include <cmath>
 #include <vector>
@@ -61,11 +62,25 @@ public:
 private:
     static constexpr double kSampleRate = 44100.0;
 
+    // Builds the same default pitch+amp envelope snapshot PluginProcessor
+    // seeds in production (DefaultEnvelopes), so these regression tests
+    // exercise the real out-of-the-box envelope shape.
+    static EnvelopeSnapshot buildDefaultSnapshot()
+    {
+        EnvelopeModel pitchModel, ampModel;
+        DefaultEnvelopes::seedPitch(pitchModel);
+        DefaultEnvelopes::seedAmp(ampModel);
+        return EnvelopeSnapshot(EnvelopeEvaluator::buildTable(pitchModel),
+                                 EnvelopeEvaluator::buildTable(ampModel));
+    }
+
     // Helper: render numSamples from a freshly prepared voice into a vector.
     // noteOnAt is the sample index at which the first noteOn fires.
     std::vector<float> render(int numSamples, int noteOnAt = 0)
     {
+        auto snap = buildDefaultSnapshot();
         SubVoice v;
+        v.setSnapshot(&snap);
         v.prepare(kSampleRate);
         std::vector<float> buf(static_cast<std::size_t>(numSamples), 0.0f);
         for (int i = 0; i < numSamples; ++i)
@@ -162,7 +177,9 @@ private:
         beginTest("(c) No NaNs or Infs");
 
         const int total = static_cast<int>(kSampleRate * 2.0); // 2 seconds
+        auto snap = buildDefaultSnapshot();
         SubVoice v;
+        v.setSnapshot(&snap);
         v.prepare(kSampleRate);
         v.noteOn(60);
 
@@ -189,7 +206,9 @@ private:
         const int chokeAt  = static_cast<int>(0.030 * kSampleRate); // retrigger at 30 ms
         const int renderTo = static_cast<int>(0.040 * kSampleRate); // inspect 10 ms past choke
 
+        auto snap = buildDefaultSnapshot();
         SubVoice v;
+        v.setSnapshot(&snap);
         v.prepare(kSampleRate);
         v.noteOn(60);
 

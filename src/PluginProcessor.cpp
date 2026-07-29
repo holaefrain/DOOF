@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "DefaultEnvelopes.h"
 
 // ── Stable parameter IDs ───────────────────────────────────────────────────────
 // IDs follow the namespaced format from §2 of project-reference.md.
@@ -18,6 +19,10 @@ DOOFAudioProcessor::DOOFAudioProcessor()
         .withInput("Sidechain", juce::AudioChannelSet::mono(),   false)),
       apvts(*this, nullptr, "DOOF_State", createParameterLayout())
 {
+    // Seed the out-of-the-box envelope shapes. Editing these becomes possible
+    // once the Phase 3 canvas exists; until then this is the only sound DOOF makes.
+    DefaultEnvelopes::seedPitch(pitchEnvelopeModel);
+    DefaultEnvelopes::seedAmp(ampEnvelopeModel);
 }
 
 DOOFAudioProcessor::~DOOFAudioProcessor() = default;
