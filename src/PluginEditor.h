@@ -32,5 +32,8 @@ private:
     // references out of it.
     EnvelopeCanvas envelopeCanvas;
 
+    // Log/Linear vertical-axis toggle for the pitch curve (§3.4).
+    juce::ToggleButton pitchLogToggle { "Log Scale (Pitch)" };
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessorEditor)
 };

@@ -12,9 +12,15 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
                      p.getAmpEnvelopeModel(),   juce::Range<double>(0.0, 1.0),
                      0.5, p)
 {
+    pitchLogToggle.onClick = [this]
+    {
+        envelopeCanvas.setPitchLogScale(pitchLogToggle.getToggleState());
+    };
+
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
+    addAndMakeVisible(pitchLogToggle);
     setSize(800, 600);
 }
 
@@ -36,5 +42,7 @@ void DOOFAudioProcessorEditor::paint(juce::Graphics& g)
 // up as more panels are added in later phases.
 void DOOFAudioProcessorEditor::resized()
 {
-    envelopeCanvas.setBounds(getLocalBounds());
+    auto bounds = getLocalBounds();
+    pitchLogToggle.setBounds(bounds.removeFromTop(24).removeFromLeft(160).reduced(2));
+    envelopeCanvas.setBounds(bounds);
 }

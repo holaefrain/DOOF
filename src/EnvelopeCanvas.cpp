@@ -1,5 +1,6 @@
 #include "EnvelopeCanvas.h"
 #include "BezierSegment.h"
+#include <cmath>
 
 EnvelopeCanvas::EnvelopeCanvas(const EnvelopeModel& pitchModelIn, juce::Range<double> pitchRangeIn,
                                const EnvelopeModel& ampModelIn,   juce::Range<double> ampRangeIn,
@@ -15,11 +16,29 @@ float EnvelopeCanvas::timeToX(double time) const
     return (float) (time / visibleSeconds * getWidth());
 }
 
-juce::Point<float> EnvelopeCanvas::toPixel(double time, double value, juce::Range<double> valueRange) const
+juce::Point<float> EnvelopeCanvas::toPixel(double time, double value, juce::Range<double> valueRange, bool useLog) const
 {
-    const float normalized = (float) ((value - valueRange.getStart()) / valueRange.getLength());
-    const float y = (float) getHeight() * (1.0f - normalized);
+    double normalized;
+    if (useLog)
+    {
+        const double logStart = std::log(valueRange.getStart());
+        const double logEnd   = std::log(valueRange.getEnd());
+        const double logValue = std::log(juce::jmax(value, valueRange.getStart()));
+        normalized = (logValue - logStart) / (logEnd - logStart);
+    }
+    else
+    {
+        normalized = (value - valueRange.getStart()) / valueRange.getLength();
+    }
+
+    const float y = (float) getHeight() * (float) (1.0 - normalized);
     return { timeToX(time), y };
+}
+
+void EnvelopeCanvas::setPitchLogScale(bool shouldUseLog)
+{
+    pitchLogScale = shouldUseLog;
+    repaint();
 }
 
 void EnvelopeCanvas::drawBeatGrid(juce::Graphics& g) const
@@ -44,7 +63,7 @@ void EnvelopeCanvas::drawBeatGrid(juce::Graphics& g) const
 }
 
 void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
-                                   juce::Range<double> valueRange, juce::Colour colour) const
+                                   juce::Range<double> valueRange, juce::Colour colour, bool useLog) const
 {
     const int numNodes = model.getNumNodes();
 
@@ -63,7 +82,7 @@ void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
         {
             const double t = (double) s / (double) kSamplesPerSegment;
             const auto pt = BezierSegment::pointAt(p0, c1, c2, p3, t);
-            const auto px = toPixel(pt.time, pt.value, valueRange);
+            const auto px = toPixel(pt.time, pt.value, valueRange, useLog);
 
             if (i == 0 && s == 0)
                 path.startNewSubPath(px);
@@ -79,7 +98,7 @@ void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
     for (int i = 0; i < numNodes; ++i)
     {
         const auto n  = model.getNode(i);
-        const auto px = toPixel(n.time, n.value, valueRange);
+        const auto px = toPixel(n.time, n.value, valueRange, useLog);
         g.fillEllipse(px.x - kNodeRadius, px.y - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
     }
 }
@@ -87,6 +106,6 @@ void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
 void EnvelopeCanvas::paint(juce::Graphics& g)
 {
     drawBeatGrid(g);
-    drawEnvelope(g, pitchModel, pitchRange, juce::Colours::cyan);
-    drawEnvelope(g, ampModel,   ampRange,   juce::Colours::orange);
+    drawEnvelope(g, pitchModel, pitchRange, juce::Colours::cyan,   pitchLogScale);
+    drawEnvelope(g, ampModel,   ampRange,   juce::Colours::orange, false); // amp always linear
 }
