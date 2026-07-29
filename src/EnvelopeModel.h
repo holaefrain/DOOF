@@ -90,6 +90,26 @@ public:
     void undo() { undoManager.undo(); }
     void redo() { undoManager.redo(); }
 
+    // Begins a gesture: starts one undo transaction that every mutating call
+    // (addNode/moveNode/deleteNode/setControlPoints) made before the matching
+    // endGesture() coalesces into, instead of each getting its own step. Used
+    // to wrap a whole continuous edit — e.g. a mouse-down-to-mouse-up node
+    // drag — into a single undo step. Gestures do not nest.
+    void beginGesture()
+    {
+        jassert(!inGesture);
+        undoManager.beginNewTransaction();
+        inGesture = true;
+    }
+
+    // Ends the current gesture. Mutating calls after this each resume
+    // starting their own transaction, as normal.
+    void endGesture()
+    {
+        jassert(inGesture);
+        inGesture = false;
+    }
+
     // Exposes the underlying tree for serialisation and for the Step 3
     // publisher to attach a ValueTree::Listener.
     juce::ValueTree& getValueTree() { return tree; }
@@ -105,6 +125,10 @@ private:
     std::unique_ptr<juce::UndoManager> ownedUndoManager; // null when using an external UndoManager
     juce::UndoManager& undoManager;                       // always valid: *ownedUndoManager, or the external one
     juce::ValueTree tree { EnvelopeIDs::envelopeType };
+
+    // True between beginGesture() and endGesture(); mutating methods skip
+    // their usual beginNewTransaction() call while this is set.
+    bool inGesture = false;
 
     // Index at which a node with the given time should be inserted to keep
     // tree children ordered ascending by time.

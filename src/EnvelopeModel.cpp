@@ -21,7 +21,8 @@ int EnvelopeModel::findInsertIndex(double time) const
 // inserts it in time order, and wraps the whole thing in one undo transaction.
 int EnvelopeModel::addNode(double time, double value)
 {
-    undoManager.beginNewTransaction();
+    if (!inGesture)
+        undoManager.beginNewTransaction();
 
     juce::ValueTree node { EnvelopeIDs::nodeType };
     node.setProperty(EnvelopeIDs::time,       time,  nullptr);
@@ -41,7 +42,8 @@ int EnvelopeModel::addNode(double time, double value)
 int EnvelopeModel::moveNode(int index, double newTime, double newValue)
 {
     jassert(juce::isPositiveAndBelow(index, tree.getNumChildren()));
-    undoManager.beginNewTransaction();
+    if (!inGesture)
+        undoManager.beginNewTransaction();
 
     auto node = tree.getChild(index);
     const double dTime  = newTime  - (double) node[EnvelopeIDs::time];
@@ -63,7 +65,8 @@ int EnvelopeModel::moveNode(int index, double newTime, double newValue)
 void EnvelopeModel::deleteNode(int index)
 {
     jassert(juce::isPositiveAndBelow(index, tree.getNumChildren()));
-    undoManager.beginNewTransaction();
+    if (!inGesture)
+        undoManager.beginNewTransaction();
     tree.removeChild(index, &undoManager);
 }
 
@@ -71,7 +74,8 @@ void EnvelopeModel::setControlPoints(int index, double cpOutTime, double cpOutVa
                                                   double cpInTime,  double cpInValue)
 {
     jassert(juce::isPositiveAndBelow(index, tree.getNumChildren()));
-    undoManager.beginNewTransaction();
+    if (!inGesture)
+        undoManager.beginNewTransaction();
 
     auto node = tree.getChild(index);
     node.setProperty(EnvelopeIDs::cpOutTime,  cpOutTime,  &undoManager);
