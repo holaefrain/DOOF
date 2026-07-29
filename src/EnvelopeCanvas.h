@@ -11,8 +11,10 @@
 //
 // Step 3 (3a) adds click-drag node movement, wrapped in a single undo gesture
 // per drag, with a value/frequency readout that follows the cursor. Step 3
-// (3b) adds double-click-to-add/delete and right-click-to-delete. Further
-// Step 3 bullets (reshape/context menu) build on this.
+// (3b) adds double-click-to-add/delete and right-click-to-delete. Step 3
+// (3c) adds dragging the curve itself (between nodes) to reshape its Bezier
+// control points, with Shift held for fine-drag. Further Step 3 bullets
+// (context menu) build on this.
 class EnvelopeCanvas : public juce::Component
 {
 public:
@@ -96,6 +98,17 @@ private:
     // nodes") near the dragged node's current position.
     void drawDragReadout(juce::Graphics& g) const;
 
+    // Identifies a point on a curve's drawn path (not a node handle) under a
+    // pixel position — the segment between node[segmentIndex] and
+    // node[segmentIndex+1], and the Bezier parameter t nearest that pixel.
+    // segmentIndex == -1 means nothing was hit.
+    struct CurveHit { bool isPitch = false; int segmentIndex = -1; double t = 0.0; };
+    CurveHit findCurveAt(juce::Point<float> pos) const;
+
+    // Fraction applied to the drag delta while Shift is held, for precise
+    // reshaping (3c: "modifier key for fine-drag").
+    static constexpr double kFineDragScale = 0.2;
+
     EnvelopeModel& pitchModel;
     juce::Range<double> pitchRange;
     EnvelopeModel& ampModel;
@@ -111,4 +124,17 @@ private:
     int draggedNodeIndex = -1;
     juce::Point<float> readoutPos;
     juce::String readoutText;
+
+    // Reshape state (3c): dragging the curve between two nodes adjusts both
+    // control points of that segment together. segmentIndex == -1 means no
+    // active reshape. The "orig" values are captured at mouseDown and held
+    // fixed for the whole gesture; every mouseDrag recomputes the new control
+    // points from these plus the total mouse delta so far, rather than
+    // incrementally, to avoid compounding error across many small deltas.
+    bool reshapingPitch = false;
+    int reshapeSegmentIndex = -1;
+    double reshapeT = 0.0;
+    double reshapeOrigCpOutTime = 0.0, reshapeOrigCpOutValue = 0.0;
+    double reshapeOrigCpInTime  = 0.0, reshapeOrigCpInValue  = 0.0;
+    double reshapeOrigMouseTime = 0.0, reshapeOrigMouseValue = 0.0;
 };

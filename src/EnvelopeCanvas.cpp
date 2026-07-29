@@ -174,22 +174,113 @@ void EnvelopeCanvas::deleteNodeAt(NodeHit hit)
     repaint();
 }
 
+// Squared distance from p to the line segment [a, b], plus the parametric
+// position (0-1) of the closest point along that segment.
+static float distanceSquaredToSegment(juce::Point<float> p, juce::Point<float> a, juce::Point<float> b, float& outFraction)
+{
+    const auto ab = b - a;
+    const float lengthSq = ab.x * ab.x + ab.y * ab.y;
+    outFraction = lengthSq > 1.0e-6f
+                    ? juce::jlimit(0.0f, 1.0f, ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / lengthSq)
+                    : 0.0f;
+    const auto closest = a + ab * outFraction;
+    return closest.getDistanceSquaredFrom(p);
+}
+
+EnvelopeCanvas::CurveHit EnvelopeCanvas::findCurveAt(juce::Point<float> pos) const
+{
+    static constexpr float kHitRadius = 10.0f;
+
+    CurveHit best;
+    float bestDistSq = kHitRadius * kHitRadius;
+
+    auto check = [&](const EnvelopeModel& model, juce::Range<double> range, bool useLog, bool isPitch)
+    {
+        const int numNodes = model.getNumNodes();
+        for (int i = 0; i + 1 < numNodes; ++i)
+        {
+            const auto a = model.getNode(i);
+            const auto b = model.getNode(i + 1);
+
+            const BezierSegment::Point p0 { a.time,      a.value };
+            const BezierSegment::Point c1 { a.cpOutTime, a.cpOutValue };
+            const BezierSegment::Point c2 { b.cpInTime,  b.cpInValue };
+            const BezierSegment::Point p3 { b.time,      b.value };
+
+            // Compare against the line segments the path is actually drawn
+            // with (between consecutive samples), not just the sample points
+            // themselves — otherwise most of the visible curve falls in gaps
+            // between samples too far apart for a tight hit radius to catch.
+            auto prevPx = toPixel(p0.time, p0.value, range, useLog);
+            for (int s = 1; s <= kSamplesPerSegment; ++s)
+            {
+                const double t0 = (double) (s - 1) / (double) kSamplesPerSegment;
+                const double t1 = (double) s       / (double) kSamplesPerSegment;
+                const auto pt1 = BezierSegment::pointAt(p0, c1, c2, p3, t1);
+                const auto px1 = toPixel(pt1.time, pt1.value, range, useLog);
+
+                float fraction = 0.0f;
+                const float distSq = distanceSquaredToSegment(pos, prevPx, px1, fraction);
+                if (distSq <= bestDistSq)
+                {
+                    bestDistSq = distSq;
+                    best = { isPitch, i, t0 + fraction * (t1 - t0) };
+                }
+
+                prevPx = px1;
+            }
+        }
+    };
+
+    check(pitchModel, pitchRange, pitchLogScale, true);
+    check(ampModel,   ampRange,   false,         false);
+
+    return best;
+}
+
 void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
 {
-    const auto hit = findNodeAt(e.position);
-    if (hit.index == -1)
-        return;
-
-    if (e.mods.isRightButtonDown())
+    const auto nodeHit = findNodeAt(e.position);
+    if (nodeHit.index != -1)
     {
-        deleteNodeAt(hit);
+        if (e.mods.isRightButtonDown())
+        {
+            deleteNodeAt(nodeHit);
+            return;
+        }
+
+        draggingPitch    = nodeHit.isPitch;
+        draggedNodeIndex = nodeHit.index;
+
+        auto& model = draggingPitch ? pitchModel : ampModel;
+        model.beginGesture();
         return;
     }
 
-    draggingPitch    = hit.isPitch;
-    draggedNodeIndex = hit.index;
+    if (e.mods.isRightButtonDown())
+        return; // right-click only deletes nodes
 
-    auto& model = draggingPitch ? pitchModel : ampModel;
+    const auto curveHit = findCurveAt(e.position);
+    if (curveHit.segmentIndex == -1)
+        return;
+
+    reshapingPitch      = curveHit.isPitch;
+    reshapeSegmentIndex = curveHit.segmentIndex;
+    reshapeT             = curveHit.t;
+
+    auto& model = reshapingPitch ? pitchModel : ampModel;
+    const auto a = model.getNode(reshapeSegmentIndex);
+    const auto b = model.getNode(reshapeSegmentIndex + 1);
+    reshapeOrigCpOutTime  = a.cpOutTime;
+    reshapeOrigCpOutValue = a.cpOutValue;
+    reshapeOrigCpInTime   = b.cpInTime;
+    reshapeOrigCpInValue  = b.cpInValue;
+
+    auto& valueRange  = reshapingPitch ? pitchRange : ampRange;
+    const bool useLog = reshapingPitch && pitchLogScale;
+    reshapeOrigMouseTime  = xToTime(e.position.x);
+    reshapeOrigMouseValue = yToValue(e.position.y, valueRange, useLog);
+
     model.beginGesture();
 }
 
@@ -216,40 +307,97 @@ void EnvelopeCanvas::mouseDoubleClick(const juce::MouseEvent& e)
 
 void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
 {
-    if (draggedNodeIndex == -1)
+    if (draggedNodeIndex != -1)
+    {
+        auto& model      = draggingPitch ? pitchModel : ampModel;
+        auto& valueRange  = draggingPitch ? pitchRange : ampRange;
+        const bool useLog = draggingPitch && pitchLogScale;
+
+        const double newTime  = juce::jlimit(0.0, visibleSeconds, xToTime(e.position.x));
+        const double newValue = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
+                                              yToValue(e.position.y, valueRange, useLog));
+
+        // moveNode can return a different index than the one passed in, when
+        // the drag crosses a neighbouring node's time and the model re-sorts
+        // — this return value must be reassigned every call (lesson from the
+        // Phase 3 Step 0 spike, where discarding it left the tracked node stale).
+        draggedNodeIndex = model.moveNode(draggedNodeIndex, newTime, newValue);
+
+        readoutPos  = toPixel(newTime, newValue, valueRange, useLog);
+        readoutText = draggingPitch
+                        ? juce::String(newValue, 1) + " Hz"
+                        : juce::String(newValue, 3);
+        readoutText += "  @ " + juce::String(newTime * 1000.0, 1) + " ms";
+
+        repaint();
         return;
+    }
 
-    auto& model      = draggingPitch ? pitchModel : ampModel;
-    auto& valueRange  = draggingPitch ? pitchRange : ampRange;
-    const bool useLog = draggingPitch && pitchLogScale;
+    if (reshapeSegmentIndex != -1)
+    {
+        auto& model       = reshapingPitch ? pitchModel : ampModel;
+        auto& valueRange   = reshapingPitch ? pitchRange : ampRange;
+        const bool useLog  = reshapingPitch && pitchLogScale;
 
-    const double newTime  = juce::jlimit(0.0, visibleSeconds, xToTime(e.position.x));
-    const double newValue = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
-                                          yToValue(e.position.y, valueRange, useLog));
+        double deltaTime  = xToTime(e.position.x) - reshapeOrigMouseTime;
+        double deltaValue = yToValue(e.position.y, valueRange, useLog) - reshapeOrigMouseValue;
 
-    // moveNode can return a different index than the one passed in, when the
-    // drag crosses a neighbouring node's time and the model re-sorts — this
-    // return value must be reassigned every call (lesson from the Phase 3
-    // Step 0 spike, where discarding it left the tracked node stale).
-    draggedNodeIndex = model.moveNode(draggedNodeIndex, newTime, newValue);
+        // Shift held: fine-drag at reduced sensitivity for precise reshaping (3c).
+        if (e.mods.isShiftDown())
+        {
+            deltaTime  *= kFineDragScale;
+            deltaValue *= kFineDragScale;
+        }
 
-    readoutPos  = toPixel(newTime, newValue, valueRange, useLog);
-    readoutText = draggingPitch
-                    ? juce::String(newValue, 1) + " Hz"
-                    : juce::String(newValue, 3);
-    readoutText += "  @ " + juce::String(newTime * 1000.0, 1) + " ms";
+        // Moving both control points of a segment by the same delta shifts
+        // the curve's point at parameter t by 3*t*(1-t)*delta (the De
+        // Casteljau basis weights for the two control points sum to that
+        // when moved together) — dividing by that factor makes the curve
+        // pass exactly through the cursor at the point originally grabbed.
+        const double clampedT = juce::jlimit(0.05, 0.95, reshapeT);
+        const double weight   = 3.0 * clampedT * (1.0 - clampedT);
+        const double cpDeltaTime  = deltaTime  / weight;
+        const double cpDeltaValue = deltaValue / weight;
 
-    repaint();
+        const auto nodeA = model.getNode(reshapeSegmentIndex);
+        const auto nodeB = model.getNode(reshapeSegmentIndex + 1);
+
+        // Control-point time is clamped to the segment's own [nodeA, nodeB]
+        // time range so the curve stays monotonic in time — BezierSegment's
+        // bisection-based lookup (used by the audio-thread evaluator) is only
+        // defined for monotonic segments.
+        const double newCpOutTime  = juce::jlimit(nodeA.time, nodeB.time, reshapeOrigCpOutTime + cpDeltaTime);
+        const double newCpInTime   = juce::jlimit(nodeA.time, nodeB.time, reshapeOrigCpInTime  + cpDeltaTime);
+        const double newCpOutValue = reshapeOrigCpOutValue + cpDeltaValue;
+        const double newCpInValue  = reshapeOrigCpInValue  + cpDeltaValue;
+
+        model.setControlPoints(reshapeSegmentIndex, newCpOutTime, newCpOutValue,
+                                                      nodeA.cpInTime, nodeA.cpInValue);
+        model.setControlPoints(reshapeSegmentIndex + 1, nodeB.cpOutTime, nodeB.cpOutValue,
+                                                          newCpInTime, newCpInValue);
+
+        repaint();
+        return;
+    }
 }
 
 void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
 {
-    if (draggedNodeIndex == -1)
+    if (draggedNodeIndex != -1)
+    {
+        auto& model = draggingPitch ? pitchModel : ampModel;
+        model.endGesture();
+        draggedNodeIndex = -1;
+        repaint();
         return;
+    }
 
-    auto& model = draggingPitch ? pitchModel : ampModel;
-    model.endGesture();
-
-    draggedNodeIndex = -1;
-    repaint();
+    if (reshapeSegmentIndex != -1)
+    {
+        auto& model = reshapingPitch ? pitchModel : ampModel;
+        model.endGesture();
+        reshapeSegmentIndex = -1;
+        repaint();
+        return;
+    }
 }
