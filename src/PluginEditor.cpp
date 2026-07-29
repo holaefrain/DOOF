@@ -3,9 +3,9 @@
 // Initialises the editor, stores the processor reference, and sets the default window size.
 // 800x600 is the flat developer skin starting size; resized to final dimensions in Phase 12.
 // Pitch range gives headroom above the default 150 Hz start; amp is always
-// [0,1]. visibleSeconds = 0.5 shows the whole default envelope shape (pitch
+// [0,1]. The initial 0.5 s view shows the whole default envelope shape (pitch
 // sweep ends at 300 ms, amp tail is near-silent by 400 ms) with a little
-// margin — Step 5's Length control will make this adjustable.
+// margin; the user can zoom/pan from there (Step 4).
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
       envelopeCanvas(p.getPitchEnvelopeModel(), juce::Range<double>(20.0, 220.0),

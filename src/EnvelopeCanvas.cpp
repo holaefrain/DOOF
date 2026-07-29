@@ -1,25 +1,32 @@
 #include "EnvelopeCanvas.h"
 #include "BezierSegment.h"
 #include "DefaultEnvelopes.h"
+#include "EnvelopeEvaluator.h"
 #include <cmath>
 
 EnvelopeCanvas::EnvelopeCanvas(EnvelopeModel& pitchModelIn, juce::Range<double> pitchRangeIn,
                                EnvelopeModel& ampModelIn,   juce::Range<double> ampRangeIn,
-                               double visibleSecondsIn, juce::AudioProcessor& processorForPlayHead)
+                               double initialViewDuration, juce::AudioProcessor& processorForPlayHead)
     : pitchModel(pitchModelIn), pitchRange(pitchRangeIn),
       ampModel(ampModelIn),     ampRange(ampRangeIn),
-      visibleSeconds(visibleSecondsIn), processor(processorForPlayHead)
+      viewDuration(initialViewDuration), processor(processorForPlayHead)
 {
 }
 
 float EnvelopeCanvas::timeToX(double time) const
 {
-    return (float) (time / visibleSeconds * getWidth());
+    return (float) ((time - viewStartTime) / viewDuration * getWidth());
 }
 
 double EnvelopeCanvas::xToTime(float x) const
 {
-    return (double) x / (double) getWidth() * visibleSeconds;
+    return viewStartTime + (double) x / (double) getWidth() * viewDuration;
+}
+
+void EnvelopeCanvas::clampView()
+{
+    const double maxStart = juce::jmax(0.0, EnvelopeEvaluator::kTableDomainSeconds - viewDuration);
+    viewStartTime = juce::jlimit(0.0, maxStart, viewStartTime);
 }
 
 double EnvelopeCanvas::yToValue(float y, juce::Range<double> valueRange, bool useLog) const
@@ -74,9 +81,11 @@ void EnvelopeCanvas::drawBeatGrid(juce::Graphics& g) const
         return;
 
     const double beatSeconds = 60.0 / *bpm;
+    const double viewEnd     = viewStartTime + viewDuration;
+    const double firstBeat   = std::ceil(viewStartTime / beatSeconds) * beatSeconds;
 
     g.setColour(juce::Colours::white.withAlpha(0.15f));
-    for (double t = 0.0; t <= visibleSeconds; t += beatSeconds)
+    for (double t = firstBeat; t <= viewEnd; t += beatSeconds)
         g.drawVerticalLine((int) timeToX(t), 0.0f, (float) getHeight());
 }
 
@@ -328,7 +337,13 @@ void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
 
     const auto curveHit = findCurveAt(e.position);
     if (curveHit.segmentIndex == -1)
+    {
+        // Neither a node nor the curve line: empty space. Pan the view (Step 4).
+        panning          = true;
+        panOrigViewStart = viewStartTime;
+        panOrigMouseX    = e.position.x;
         return;
+    }
 
     reshapingPitch      = curveHit.isPitch;
     reshapeSegmentIndex = curveHit.segmentIndex;
@@ -363,7 +378,7 @@ void EnvelopeCanvas::mouseDoubleClick(const juce::MouseEvent& e)
     auto& valueRange    = (activeCurve == ActiveCurve::pitch) ? pitchRange : ampRange;
     const bool useLog   = (activeCurve == ActiveCurve::pitch) && pitchLogScale;
 
-    const double time  = juce::jlimit(0.0, visibleSeconds, xToTime(e.position.x));
+    const double time  = juce::jlimit(0.0, EnvelopeEvaluator::kTableDomainSeconds, xToTime(e.position.x));
     const double value = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
                                        yToValue(e.position.y, valueRange, useLog));
 
@@ -379,7 +394,7 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
         auto& valueRange  = draggingPitch ? pitchRange : ampRange;
         const bool useLog = draggingPitch && pitchLogScale;
 
-        const double newTime  = juce::jlimit(0.0, visibleSeconds, xToTime(e.position.x));
+        const double newTime  = juce::jlimit(0.0, EnvelopeEvaluator::kTableDomainSeconds, xToTime(e.position.x));
         const double newValue = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
                                               yToValue(e.position.y, valueRange, useLog));
 
@@ -445,6 +460,17 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
         repaint();
         return;
     }
+
+    if (panning)
+    {
+        // Dragging right reveals earlier time (the content follows the
+        // cursor, like grabbing a scrollable canvas).
+        const float dx = e.position.x - panOrigMouseX;
+        viewStartTime = panOrigViewStart - (double) dx / (double) getWidth() * viewDuration;
+        clampView();
+        repaint();
+        return;
+    }
 }
 
 void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
@@ -466,4 +492,29 @@ void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
         repaint();
         return;
     }
+
+    if (panning)
+    {
+        panning = false;
+        return;
+    }
+}
+
+void EnvelopeCanvas::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    if (wheel.deltaY == 0.0f)
+        return;
+
+    // Zoom centered on the cursor: keep the time under the cursor fixed
+    // while the view duration shrinks/grows around it.
+    const double anchorTime     = xToTime(e.position.x);
+    const double anchorFraction = juce::jlimit(0.0, 1.0, (double) e.position.x / (double) getWidth());
+
+    const double factor = (wheel.deltaY > 0.0f) ? (1.0 - kZoomStep) : (1.0 / (1.0 - kZoomStep));
+    viewDuration = juce::jlimit(kMinViewDuration, EnvelopeEvaluator::kTableDomainSeconds, viewDuration * factor);
+
+    viewStartTime = anchorTime - anchorFraction * viewDuration;
+    clampView();
+
+    repaint();
 }

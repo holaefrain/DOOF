@@ -14,8 +14,10 @@
 // (3b) adds double-click-to-add a node. Step 3 (3c) adds dragging the curve
 // itself (between nodes) to reshape its Bezier control points, with Shift
 // held for fine-drag. Step 3 (3d) adds a right-click context menu (Delete
-// Node, Reset Curve, Copy Curve) — right-click no longer deletes instantly
-// as it did in 3b; that's now a menu item alongside the others.
+// Node, Reset Curve, Copy Curve, Paste Curve) — right-click no longer deletes
+// instantly as it did in 3b; that's now a menu item alongside the others.
+// Step 4 adds mouse-wheel zoom and empty-space-drag pan on the time axis —
+// a rendering-only transform of the view window, never the model.
 class EnvelopeCanvas : public juce::Component
 {
 public:
@@ -27,15 +29,16 @@ public:
     // pitchModel/ampModel must outlive this component and are edited directly
     // by this component's drag interaction. pitchRange/ampRange are each
     // model's vertical axis extent in its own units, used only to normalize
-    // into the shared display space. visibleSeconds is the shared horizontal
-    // axis extent (Step 5's Length control will make this adjustable; fixed
-    // here for the initial render). processorForPlayHead must outlive this
-    // component; its play head (if any) drives the beat grid's tempo, read
-    // fresh on every paint so host tempo changes show up without this
-    // component needing to know when they happen.
+    // into the shared display space. initialViewDuration is the shared
+    // horizontal axis extent shown at startup, before any zoom/pan (Step 5's
+    // Length control will add a separate notion of the model's own working
+    // duration; this is purely the initial camera position). processorForPlayHead
+    // must outlive this component; its play head (if any) drives the beat
+    // grid's tempo, read fresh on every paint so host tempo changes show up
+    // without this component needing to know when they happen.
     EnvelopeCanvas(EnvelopeModel& pitchModel, juce::Range<double> pitchRange,
                    EnvelopeModel& ampModel,   juce::Range<double> ampRange,
-                   double visibleSeconds, juce::AudioProcessor& processorForPlayHead);
+                   double initialViewDuration, juce::AudioProcessor& processorForPlayHead);
 
     void paint(juce::Graphics&) override;
 
@@ -43,6 +46,7 @@ public:
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
     void mouseDoubleClick(const juce::MouseEvent&) override;
+    void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
     // Switches the pitch curve's vertical mapping between linear and log
     // scale (§3.4: "Log / Linear vertical-axis toggle"). Log applies to
@@ -58,11 +62,16 @@ private:
     // that individual line segments aren't visible at typical canvas sizes.
     static constexpr int kSamplesPerSegment = 32;
 
-    // Maps a time to an x pixel coordinate across the visible time range.
+    // Maps a time to an x pixel coordinate across the current view window
+    // [viewStartTime, viewStartTime + viewDuration].
     float timeToX(double time) const;
 
-    // Inverse of timeToX: pixel x back to a time, NOT clamped to [0, visibleSeconds].
+    // Inverse of timeToX: pixel x back to a time, NOT clamped to the view window.
     double xToTime(float x) const;
+
+    // Clamps viewStartTime so the view window never goes before time 0 or
+    // past the end of the valid domain (EnvelopeEvaluator::kTableDomainSeconds).
+    void clampView();
 
     // Inverse of a value's position within toPixel's y mapping (log-scaled if
     // useLog), NOT clamped to valueRange.
@@ -131,11 +140,24 @@ private:
     // reshaping (3c: "modifier key for fine-drag").
     static constexpr double kFineDragScale = 0.2;
 
+    // Zoom bounds (Step 4): can't zoom in below 10 ms, can't zoom out past
+    // the full valid domain (there's nothing beyond it to show).
+    static constexpr double kMinViewDuration = 0.01;
+
+    // Fraction of the current view duration zoomed per wheel notch.
+    static constexpr double kZoomStep = 0.15;
+
     EnvelopeModel& pitchModel;
     juce::Range<double> pitchRange;
     EnvelopeModel& ampModel;
     juce::Range<double> ampRange;
-    double visibleSeconds;
+
+    // The current view window: [viewStartTime, viewStartTime + viewDuration]
+    // is what's mapped across the canvas's full width. Rendering-only state —
+    // never read by anything outside this component, never touches the model.
+    double viewStartTime = 0.0;
+    double viewDuration;
+
     juce::AudioProcessor& processor;
     bool pitchLogScale = false;
     ActiveCurve activeCurve = ActiveCurve::pitch;
@@ -159,4 +181,11 @@ private:
     double reshapeOrigCpOutTime = 0.0, reshapeOrigCpOutValue = 0.0;
     double reshapeOrigCpInTime  = 0.0, reshapeOrigCpInValue  = 0.0;
     double reshapeOrigMouseTime = 0.0, reshapeOrigMouseValue = 0.0;
+
+    // Pan state (Step 4): dragging empty space (not a node or curve) pans
+    // the view. Captured at mouseDown and held fixed for the whole gesture,
+    // same reasoning as the reshape state above.
+    bool panning = false;
+    double panOrigViewStart = 0.0;
+    float panOrigMouseX = 0.0f;
 };
