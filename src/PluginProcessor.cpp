@@ -91,6 +91,10 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 {
     juce::ScopedNoDenormals noDenormals;
 
+    // Load the current envelope snapshot once for this whole block (§2: the
+    // audio thread loads the atomic pointer once per block, never per-sample).
+    voice.setSnapshot(envelopePublisher.getSnapshot());
+
     // Step 1 — handle MIDI events.
     // Note-off is intentionally ignored: the amp envelope handles the voice decay.
     for (const auto metadata : midiMessages)

@@ -1,6 +1,8 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "SubVoice.h"
+#include "EnvelopeModel.h"
+#include "EnvelopePublisher.h"
 
 // DOOFAudioProcessor — the audio engine and plugin host.
 // Owns the signal path and satisfies the JUCE AudioProcessor contract so the
@@ -65,6 +67,22 @@ private:
 
     // The single mono voice: one sine oscillator with pitch/amp envelopes and choke logic.
     SubVoice voice;
+
+    // Node-based pitch and amp envelope data (§3.1). Message-thread only — the
+    // audio thread never touches these directly, only the snapshots published
+    // through envelopePublisher below.
+    //
+    // Declaration order matters: envelopePublisher stores references to these
+    // two models, so they must be declared (and therefore constructed) first —
+    // C++ constructs members in declaration order regardless of initializer
+    // list order, and reversing this would leave envelopePublisher holding
+    // dangling references during its own construction.
+    EnvelopeModel pitchEnvelopeModel;
+    EnvelopeModel ampEnvelopeModel;
+
+    // Bridges the two models above to the audio thread: rebuilds and publishes
+    // a new EnvelopeSnapshot via atomic-pointer swap on every edit (§2).
+    EnvelopePublisher envelopePublisher { pitchEnvelopeModel, ampEnvelopeModel };
 
     // DC blocker state variables.
     // Implements y[n] = x[n] - x[n-1] + R * y[n-1] — a one-pole high-pass (~10 Hz) that
