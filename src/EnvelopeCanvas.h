@@ -10,11 +10,17 @@
 // [0,1]).
 //
 // Step 3 (3a) adds click-drag node movement, wrapped in a single undo gesture
-// per drag, with a value/frequency readout that follows the cursor. Further
-// Step 3 bullets (add/delete/reshape/context menu) build on this.
+// per drag, with a value/frequency readout that follows the cursor. Step 3
+// (3b) adds double-click-to-add/delete and right-click-to-delete. Further
+// Step 3 bullets (reshape/context menu) build on this.
 class EnvelopeCanvas : public juce::Component
 {
 public:
+    // Which curve double-click-on-empty-space adds a new node to. Chosen
+    // explicitly rather than by cursor proximity to a curve, since proximity
+    // is ambiguous near crossings and undefined when a model has zero nodes.
+    enum class ActiveCurve { pitch, amp };
+    void setActiveCurve(ActiveCurve curve) { activeCurve = curve; }
     // pitchModel/ampModel must outlive this component and are edited directly
     // by this component's drag interaction. pitchRange/ampRange are each
     // model's vertical axis extent in its own units, used only to normalize
@@ -33,6 +39,7 @@ public:
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
+    void mouseDoubleClick(const juce::MouseEvent&) override;
 
     // Switches the pitch curve's vertical mapping between linear and log
     // scale (§3.4: "Log / Linear vertical-axis toggle"). Log applies to
@@ -82,6 +89,9 @@ private:
     struct NodeHit { bool isPitch = false; int index = -1; };
     NodeHit findNodeAt(juce::Point<float> pos) const;
 
+    // Deletes the node identified by hit. One undo step (deleteNode's own).
+    void deleteNodeAt(NodeHit hit);
+
     // Draws the drag readout (§3.4: "Frequency readout while dragging
     // nodes") near the dragged node's current position.
     void drawDragReadout(juce::Graphics& g) const;
@@ -93,6 +103,7 @@ private:
     double visibleSeconds;
     juce::AudioProcessor& processor;
     bool pitchLogScale = false;
+    ActiveCurve activeCurve = ActiveCurve::pitch;
 
     // Drag state: which node (if any) is currently being dragged, and which
     // model it belongs to. index == -1 means no active drag.

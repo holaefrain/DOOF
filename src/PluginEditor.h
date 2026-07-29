@@ -49,5 +49,8 @@ private:
     juce::TextButton undoButton { "Undo" };
     juce::TextButton redoButton { "Redo" };
 
+    // Which curve double-click-to-add-a-node targets (§Step 3, 3b).
+    juce::ComboBox editingCurveBox;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessorEditor)
 };

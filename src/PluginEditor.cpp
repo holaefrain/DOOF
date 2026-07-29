@@ -19,12 +19,23 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     undoButton.onClick = [this] { performUndo(); };
     redoButton.onClick = [this] { performRedo(); };
 
+    editingCurveBox.addItem("Pitch", 1);
+    editingCurveBox.addItem("Amp",   2);
+    editingCurveBox.setSelectedId(1, juce::dontSendNotification);
+    editingCurveBox.onChange = [this]
+    {
+        envelopeCanvas.setActiveCurve(editingCurveBox.getSelectedId() == 1
+                                           ? EnvelopeCanvas::ActiveCurve::pitch
+                                           : EnvelopeCanvas::ActiveCurve::amp);
+    };
+
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
     addAndMakeVisible(pitchLogToggle);
     addAndMakeVisible(undoButton);
     addAndMakeVisible(redoButton);
+    addAndMakeVisible(editingCurveBox);
     setSize(800, 600);
 
     // Undo/redo shortcuts need somewhere to land initially; a click on
@@ -58,6 +69,7 @@ void DOOFAudioProcessorEditor::resized()
     pitchLogToggle.setBounds(topBar.removeFromLeft(160).reduced(2));
     undoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     redoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
+    editingCurveBox.setBounds(topBar.removeFromLeft(100).reduced(2));
     envelopeCanvas.setBounds(bounds);
 }
 

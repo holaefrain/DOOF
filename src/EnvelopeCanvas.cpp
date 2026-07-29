@@ -167,17 +167,51 @@ EnvelopeCanvas::NodeHit EnvelopeCanvas::findNodeAt(juce::Point<float> pos) const
     return best;
 }
 
+void EnvelopeCanvas::deleteNodeAt(NodeHit hit)
+{
+    auto& model = hit.isPitch ? pitchModel : ampModel;
+    model.deleteNode(hit.index);
+    repaint();
+}
+
 void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
 {
     const auto hit = findNodeAt(e.position);
     if (hit.index == -1)
         return;
 
+    if (e.mods.isRightButtonDown())
+    {
+        deleteNodeAt(hit);
+        return;
+    }
+
     draggingPitch    = hit.isPitch;
     draggedNodeIndex = hit.index;
 
     auto& model = draggingPitch ? pitchModel : ampModel;
     model.beginGesture();
+}
+
+void EnvelopeCanvas::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    const auto hit = findNodeAt(e.position);
+    if (hit.index != -1)
+    {
+        deleteNodeAt(hit);
+        return;
+    }
+
+    auto& model        = (activeCurve == ActiveCurve::pitch) ? pitchModel : ampModel;
+    auto& valueRange    = (activeCurve == ActiveCurve::pitch) ? pitchRange : ampRange;
+    const bool useLog   = (activeCurve == ActiveCurve::pitch) && pitchLogScale;
+
+    const double time  = juce::jlimit(0.0, visibleSeconds, xToTime(e.position.x));
+    const double value = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
+                                       yToValue(e.position.y, valueRange, useLog));
+
+    model.addNode(time, value);
+    repaint();
 }
 
 void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
