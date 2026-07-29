@@ -68,17 +68,31 @@ private:
     // The single mono voice: one sine oscillator with pitch/amp envelopes and choke logic.
     SubVoice voice;
 
+    // Shared undo history for both envelope models below (Phase 3 §3.4: "Undo
+    // / redo, 30 steps"), so a single undo reverts the most recent edit
+    // chronologically, regardless of whether it touched pitch or amp.
+    // UndoManager(1, 30): the tiny 1-unit budget is exceeded almost
+    // immediately by any transaction, which forces JUCE's trimming logic to
+    // constantly drop the oldest transaction down to the 30-transaction
+    // floor — a real hard cap, not just a hint (see juce_UndoManager.cpp's
+    // dropOldTransactionsIfTooLarge()).
+    //
+    // Declaration order matters: this must be constructed before the two
+    // models below, which take a pointer to it in their constructor calls —
+    // C++ constructs members in declaration order regardless of initializer
+    // list order.
+    juce::UndoManager envelopeUndoManager { 1, 30 };
+
     // Node-based pitch and amp envelope data (§3.1). Message-thread only — the
     // audio thread never touches these directly, only the snapshots published
     // through envelopePublisher below.
     //
     // Declaration order matters: envelopePublisher stores references to these
-    // two models, so they must be declared (and therefore constructed) first —
-    // C++ constructs members in declaration order regardless of initializer
-    // list order, and reversing this would leave envelopePublisher holding
-    // dangling references during its own construction.
-    EnvelopeModel pitchEnvelopeModel;
-    EnvelopeModel ampEnvelopeModel;
+    // two models, so they must be declared (and therefore constructed) after
+    // envelopeUndoManager but before envelopePublisher — reversing either
+    // would leave a dangling reference during construction.
+    EnvelopeModel pitchEnvelopeModel { &envelopeUndoManager };
+    EnvelopeModel ampEnvelopeModel   { &envelopeUndoManager };
 
     // Bridges the two models above to the audio thread: rebuilds and publishes
     // a new EnvelopeSnapshot via atomic-pointer swap on every edit (§2).
