@@ -10,7 +10,7 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
       envelopeCanvas(p.getPitchEnvelopeModel(), juce::Range<double>(20.0, 220.0),
                      p.getAmpEnvelopeModel(),   juce::Range<double>(0.0, 1.0),
-                     0.5)
+                     0.5, p)
 {
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.

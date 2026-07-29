@@ -3,19 +3,44 @@
 
 EnvelopeCanvas::EnvelopeCanvas(const EnvelopeModel& pitchModelIn, juce::Range<double> pitchRangeIn,
                                const EnvelopeModel& ampModelIn,   juce::Range<double> ampRangeIn,
-                               double visibleSecondsIn)
+                               double visibleSecondsIn, juce::AudioProcessor& processorForPlayHead)
     : pitchModel(pitchModelIn), pitchRange(pitchRangeIn),
       ampModel(ampModelIn),     ampRange(ampRangeIn),
-      visibleSeconds(visibleSecondsIn)
+      visibleSeconds(visibleSecondsIn), processor(processorForPlayHead)
 {
+}
+
+float EnvelopeCanvas::timeToX(double time) const
+{
+    return (float) (time / visibleSeconds * getWidth());
 }
 
 juce::Point<float> EnvelopeCanvas::toPixel(double time, double value, juce::Range<double> valueRange) const
 {
-    const float x = (float) (time / visibleSeconds * getWidth());
     const float normalized = (float) ((value - valueRange.getStart()) / valueRange.getLength());
     const float y = (float) getHeight() * (1.0f - normalized);
-    return { x, y };
+    return { timeToX(time), y };
+}
+
+void EnvelopeCanvas::drawBeatGrid(juce::Graphics& g) const
+{
+    auto* playHead = processor.getPlayHead();
+    if (playHead == nullptr)
+        return;
+
+    const auto position = playHead->getPosition();
+    if (! position.hasValue())
+        return;
+
+    const auto bpm = position->getBpm();
+    if (! bpm.hasValue() || *bpm <= 0.0)
+        return;
+
+    const double beatSeconds = 60.0 / *bpm;
+
+    g.setColour(juce::Colours::white.withAlpha(0.15f));
+    for (double t = 0.0; t <= visibleSeconds; t += beatSeconds)
+        g.drawVerticalLine((int) timeToX(t), 0.0f, (float) getHeight());
 }
 
 void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
@@ -61,6 +86,7 @@ void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
 
 void EnvelopeCanvas::paint(juce::Graphics& g)
 {
+    drawBeatGrid(g);
     drawEnvelope(g, pitchModel, pitchRange, juce::Colours::cyan);
     drawEnvelope(g, ampModel,   ampRange,   juce::Colours::orange);
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 #include "EnvelopeModel.h"
 
 // EnvelopeCanvas — the central canvas (project-architecture.md §3.4): renders
@@ -17,10 +18,13 @@ public:
     // are each model's vertical axis extent in its own units, used only to
     // normalize into the shared display space. visibleSeconds is the shared
     // horizontal axis extent (Step 5's Length control will make this
-    // adjustable; fixed here for the initial render).
+    // adjustable; fixed here for the initial render). processorForPlayHead
+    // must outlive this component; its play head (if any) drives the beat
+    // grid's tempo, read fresh on every paint so host tempo changes show up
+    // without this component needing to know when they happen.
     EnvelopeCanvas(const EnvelopeModel& pitchModel, juce::Range<double> pitchRange,
                    const EnvelopeModel& ampModel,   juce::Range<double> ampRange,
-                   double visibleSeconds);
+                   double visibleSeconds, juce::AudioProcessor& processorForPlayHead);
 
     void paint(juce::Graphics&) override;
 
@@ -28,6 +32,9 @@ private:
     // Points sampled per Bezier segment when drawing a curve — fine enough
     // that individual line segments aren't visible at typical canvas sizes.
     static constexpr int kSamplesPerSegment = 32;
+
+    // Maps a time to an x pixel coordinate across the visible time range.
+    float timeToX(double time) const;
 
     // Maps a (time, value) point into pixel space, normalizing value against
     // valueRange first so different curves share the canvas's full height.
@@ -38,9 +45,16 @@ private:
     void drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
                        juce::Range<double> valueRange, juce::Colour colour) const;
 
+    // Vertical gridlines at each beat boundary across the visible time range,
+    // read from the host's current tempo (§3.4: "Beat grid ... synced to host
+    // BPM"). Silently skipped if the host hasn't provided a play head or a
+    // tempo yet.
+    void drawBeatGrid(juce::Graphics& g) const;
+
     const EnvelopeModel& pitchModel;
     juce::Range<double> pitchRange;
     const EnvelopeModel& ampModel;
     juce::Range<double> ampRange;
     double visibleSeconds;
+    juce::AudioProcessor& processor;
 };
