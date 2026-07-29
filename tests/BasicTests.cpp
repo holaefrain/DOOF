@@ -257,6 +257,9 @@ public:
         testSetControlPoints();
         testSerializeRoundTrip();
         testUndoRedoAddMoveDelete();
+        testGestureCoalescesMultiMoveIntoOneUndo();
+        testEditsOutsideGestureEachGetOwnStep();
+        testGestureUndoInterleavedAcrossModelsIsChronological();
     }
 
 private:
@@ -442,6 +445,102 @@ private:
         model.redo(); // redo T4
         expectEquals(model.getNumNodes(), 1);
         expectWithinAbsoluteError(model.getNode(0).time, 0.05, 1.0e-9);
+    }
+
+    // (i) A multi-step drag — several moveNode calls bracketed by beginGesture/
+    // endGesture — undoes in one step, back to the node's pre-drag position.
+    void testGestureCoalescesMultiMoveIntoOneUndo()
+    {
+        beginTest("(i) beginGesture/endGesture coalesces a multi-move drag into one undo step");
+
+        EnvelopeModel model;
+        model.addNode(0.0, 0.0); // T1, own step
+
+        model.beginGesture();
+        model.moveNode(0, 0.1, 1.0);
+        model.moveNode(0, 0.2, 2.0);
+        model.moveNode(0, 0.3, 3.0);
+        model.endGesture();
+
+        expectWithinAbsoluteError(model.getNode(0).time,  0.3, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(0).value, 3.0, 1.0e-9);
+
+        model.undo(); // should undo the whole gesture in one step
+        expectWithinAbsoluteError(model.getNode(0).time,  0.0, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(0).value, 0.0, 1.0e-9);
+
+        model.undo(); // undo T1 -> back to empty
+        expectEquals(model.getNumNodes(), 0);
+    }
+
+    // (j) Edits made outside a gesture still each get their own undo step, even
+    // when they sit immediately before/after a gesture in the same history.
+    void testEditsOutsideGestureEachGetOwnStep()
+    {
+        beginTest("(j) Edits outside a gesture keep their own undo step");
+
+        EnvelopeModel model;
+        model.addNode(0.0, 0.0);  // T1
+        model.addNode(0.1, 1.0);  // T2, own step
+
+        model.beginGesture();
+        model.moveNode(1, 0.2, 2.0);
+        model.moveNode(1, 0.3, 3.0);
+        model.endGesture();       // T3, one coalesced step
+
+        model.deleteNode(0);      // T4, own step
+        expectEquals(model.getNumNodes(), 1);
+
+        model.undo(); // undo T4 -> deleted node comes back
+        expectEquals(model.getNumNodes(), 2);
+
+        model.undo(); // undo T3 -> the whole gesture reverts in one step
+        expectWithinAbsoluteError(model.getNode(1).time,  0.1, 1.0e-9);
+        expectWithinAbsoluteError(model.getNode(1).value, 1.0, 1.0e-9);
+
+        model.undo(); // undo T2 -> back to one node
+        expectEquals(model.getNumNodes(), 1);
+
+        model.undo(); // undo T1 -> back to empty
+        expectEquals(model.getNumNodes(), 0);
+    }
+
+    // (k) With two models sharing one UndoManager (PluginProcessor's pitch/amp
+    // setup), undo walks back in true chronological order regardless of which
+    // model each step touched, and a gesture on one model still counts as a
+    // single step in that shared history.
+    void testGestureUndoInterleavedAcrossModelsIsChronological()
+    {
+        beginTest("(k) Undo interleaved across two models is chronological, gesture still one step");
+
+        juce::UndoManager sharedUndo;
+        EnvelopeModel pitchModel(&sharedUndo);
+        EnvelopeModel ampModel(&sharedUndo);
+
+        pitchModel.addNode(0.0, 100.0); // T1 (pitch)
+        ampModel.addNode(0.0, 0.5);     // T2 (amp)
+
+        pitchModel.beginGesture();
+        pitchModel.moveNode(0, 0.1, 110.0);
+        pitchModel.moveNode(0, 0.2, 120.0);
+        pitchModel.endGesture();        // T3 (pitch), one coalesced step
+
+        ampModel.addNode(0.1, 0.8);     // T4 (amp)
+
+        expectEquals(ampModel.getNumNodes(), 2);
+
+        sharedUndo.undo(); // undo T4 -> amp back to 1 node
+        expectEquals(ampModel.getNumNodes(), 1);
+
+        sharedUndo.undo(); // undo T3 -> pitch gesture reverts fully in one step
+        expectWithinAbsoluteError(pitchModel.getNode(0).time,  0.0,   1.0e-9);
+        expectWithinAbsoluteError(pitchModel.getNode(0).value, 100.0, 1.0e-9);
+
+        sharedUndo.undo(); // undo T2 -> amp back to empty
+        expectEquals(ampModel.getNumNodes(), 0);
+
+        sharedUndo.undo(); // undo T1 -> pitch back to empty
+        expectEquals(pitchModel.getNumNodes(), 0);
     }
 };
 
