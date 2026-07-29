@@ -1,5 +1,6 @@
 #pragma once
 #include "PluginProcessor.h"
+#include "EnvelopeCanvas.h"
 
 // DOOFAudioProcessorEditor — the plugin's GUI root window.
 // Owns all visible panels and controls. Created and destroyed by the host
@@ -25,6 +26,11 @@ private:
     // Back-reference to the processor; used to access parameters and engine state.
     // Guaranteed valid for the lifetime of this editor (processor outlives editor).
     DOOFAudioProcessor& audioProcessor;
+
+    // The central canvas (§3.4): pitch + amp curves overlaid on one time axis.
+    // Declared after audioProcessor since its constructor reads model
+    // references out of it.
+    EnvelopeCanvas envelopeCanvas;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessorEditor)
 };

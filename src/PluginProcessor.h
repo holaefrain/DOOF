@@ -60,6 +60,11 @@ public:
     // Declared public so the editor can attach sliders/buttons directly via attachment objects.
     juce::AudioProcessorValueTreeState apvts;
 
+    // Read-only access for the editor's canvas (Phase 3 Step 2). Non-const
+    // access for direct editing arrives with Step 3's node interaction.
+    const EnvelopeModel& getPitchEnvelopeModel() const { return pitchEnvelopeModel; }
+    const EnvelopeModel& getAmpEnvelopeModel()   const { return ampEnvelopeModel; }
+
 private:
     // Builds the parameter layout passed to the APVTS constructor.
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.

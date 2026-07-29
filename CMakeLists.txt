@@ -36,6 +36,7 @@ target_sources(DOOF
     PRIVATE
         src/PluginProcessor.cpp   # audio engine + JUCE AudioProcessor boilerplate
         src/PluginEditor.cpp      # GUI root + JUCE AudioProcessorEditor boilerplate
+        src/EnvelopeCanvas.cpp    # central canvas: pitch+amp curve rendering (§3.4)
         src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
         src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
         src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
