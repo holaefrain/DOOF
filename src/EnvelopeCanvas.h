@@ -11,10 +11,11 @@
 //
 // Step 3 (3a) adds click-drag node movement, wrapped in a single undo gesture
 // per drag, with a value/frequency readout that follows the cursor. Step 3
-// (3b) adds double-click-to-add/delete and right-click-to-delete. Step 3
-// (3c) adds dragging the curve itself (between nodes) to reshape its Bezier
-// control points, with Shift held for fine-drag. Further Step 3 bullets
-// (context menu) build on this.
+// (3b) adds double-click-to-add a node. Step 3 (3c) adds dragging the curve
+// itself (between nodes) to reshape its Bezier control points, with Shift
+// held for fine-drag. Step 3 (3d) adds a right-click context menu (Delete
+// Node, Reset Curve, Copy Curve) — right-click no longer deletes instantly
+// as it did in 3b; that's now a menu item alongside the others.
 class EnvelopeCanvas : public juce::Component
 {
 public:
@@ -93,6 +94,27 @@ private:
 
     // Deletes the node identified by hit. One undo step (deleteNode's own).
     void deleteNodeAt(NodeHit hit);
+
+    // Right-click context menu (3d). If hit names a node, its curve is used
+    // and "Delete Node" is offered; otherwise the currently active curve
+    // (the "Editing" selector) is used and there's nothing to delete.
+    void showContextMenu(NodeHit hit);
+
+    // Replaces all of a curve's nodes with its out-of-the-box DefaultEnvelopes
+    // shape. One undo step (wrapped in a gesture), so it can be undone like
+    // any other edit.
+    void resetCurve(bool isPitch);
+
+    // Serializes a curve's node data to XML and puts it on the system
+    // clipboard. Building block for copying an envelope shape between layers
+    // in a later phase, and pasted cross-curve today via pasteCurve().
+    void copyCurve(bool isPitch) const;
+
+    // Replaces a curve's nodes with whatever envelope XML is on the system
+    // clipboard (as put there by copyCurve, possibly from the other curve).
+    // Does nothing if the clipboard doesn't hold valid envelope XML. One
+    // undo step (wrapped in a gesture).
+    void pasteCurve(bool isPitch);
 
     // Draws the drag readout (§3.4: "Frequency readout while dragging
     // nodes") near the dragged node's current position.

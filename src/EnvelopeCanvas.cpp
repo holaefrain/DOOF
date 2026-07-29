@@ -1,5 +1,6 @@
 #include "EnvelopeCanvas.h"
 #include "BezierSegment.h"
+#include "DefaultEnvelopes.h"
 #include <cmath>
 
 EnvelopeCanvas::EnvelopeCanvas(EnvelopeModel& pitchModelIn, juce::Range<double> pitchRangeIn,
@@ -174,6 +175,73 @@ void EnvelopeCanvas::deleteNodeAt(NodeHit hit)
     repaint();
 }
 
+void EnvelopeCanvas::resetCurve(bool isPitch)
+{
+    auto& model = isPitch ? pitchModel : ampModel;
+
+    model.beginGesture();
+    while (model.getNumNodes() > 0)
+        model.deleteNode(0);
+
+    if (isPitch)
+        DefaultEnvelopes::seedPitch(model);
+    else
+        DefaultEnvelopes::seedAmp(model);
+
+    model.endGesture();
+    repaint();
+}
+
+void EnvelopeCanvas::copyCurve(bool isPitch) const
+{
+    const auto& model = isPitch ? pitchModel : ampModel;
+    const std::unique_ptr<juce::XmlElement> xml(model.getValueTree().createXml());
+    juce::SystemClipboard::copyTextToClipboard(xml->toString());
+}
+
+void EnvelopeCanvas::pasteCurve(bool isPitch)
+{
+    const auto xml = juce::parseXML(juce::SystemClipboard::getTextFromClipboard());
+    if (xml == nullptr)
+        return;
+
+    const auto tree = juce::ValueTree::fromXml(*xml);
+    if (! tree.hasType(EnvelopeIDs::envelopeType))
+        return;
+
+    auto& model = isPitch ? pitchModel : ampModel;
+
+    model.beginGesture();
+    while (model.getNumNodes() > 0)
+        model.deleteNode(0);
+
+    for (int i = 0; i < tree.getNumChildren(); ++i)
+    {
+        const auto srcNode = tree.getChild(i);
+        const int index = model.addNode(srcNode[EnvelopeIDs::time], srcNode[EnvelopeIDs::value]);
+        model.setControlPoints(index,
+                                srcNode[EnvelopeIDs::cpOutTime], srcNode[EnvelopeIDs::cpOutValue],
+                                srcNode[EnvelopeIDs::cpInTime],  srcNode[EnvelopeIDs::cpInValue]);
+    }
+
+    model.endGesture();
+    repaint();
+}
+
+void EnvelopeCanvas::showContextMenu(NodeHit hit)
+{
+    const bool isPitch = (hit.index != -1) ? hit.isPitch : (activeCurve == ActiveCurve::pitch);
+
+    juce::PopupMenu menu;
+    if (hit.index != -1)
+        menu.addItem("Delete Node", [this, hit] { deleteNodeAt(hit); });
+    menu.addItem("Reset Curve", [this, isPitch] { resetCurve(isPitch); });
+    menu.addItem("Copy Curve",  [this, isPitch] { copyCurve(isPitch); });
+    menu.addItem("Paste Curve", [this, isPitch] { pasteCurve(isPitch); });
+
+    menu.showMenuAsync(juce::PopupMenu::Options());
+}
+
 // Squared distance from p to the line segment [a, b], plus the parametric
 // position (0-1) of the closest point along that segment.
 static float distanceSquaredToSegment(juce::Point<float> p, juce::Point<float> a, juce::Point<float> b, float& outFraction)
@@ -241,14 +309,15 @@ EnvelopeCanvas::CurveHit EnvelopeCanvas::findCurveAt(juce::Point<float> pos) con
 void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
 {
     const auto nodeHit = findNodeAt(e.position);
+
+    if (e.mods.isPopupMenu())
+    {
+        showContextMenu(nodeHit);
+        return;
+    }
+
     if (nodeHit.index != -1)
     {
-        if (e.mods.isRightButtonDown())
-        {
-            deleteNodeAt(nodeHit);
-            return;
-        }
-
         draggingPitch    = nodeHit.isPitch;
         draggedNodeIndex = nodeHit.index;
 
@@ -256,9 +325,6 @@ void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
         model.beginGesture();
         return;
     }
-
-    if (e.mods.isRightButtonDown())
-        return; // right-click only deletes nodes
 
     const auto curveHit = findCurveAt(e.position);
     if (curveHit.segmentIndex == -1)
