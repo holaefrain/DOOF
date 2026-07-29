@@ -1,5 +1,11 @@
 #include "EnvelopeModel.h"
 
+EnvelopeModel::EnvelopeModel(juce::UndoManager* externalUndoManager)
+    : ownedUndoManager(externalUndoManager == nullptr ? std::make_unique<juce::UndoManager>() : nullptr),
+      undoManager(externalUndoManager != nullptr ? *externalUndoManager : *ownedUndoManager)
+{
+}
+
 // Index at which a node with the given time should be inserted to keep
 // tree children ordered ascending by time (first index whose time exceeds it).
 int EnvelopeModel::findInsertIndex(double time) const

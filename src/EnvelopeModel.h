@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_data_structures/juce_data_structures.h>
+#include <memory>
 
 // EnvelopeIDs — ValueTree schema for a node-based envelope (§2, §3.1 of project-architecture.md).
 //
@@ -43,7 +44,12 @@ namespace EnvelopeIDs
 class EnvelopeModel
 {
 public:
-    EnvelopeModel() = default;
+    // externalUndoManager, if given, is used instead of an owned UndoManager
+    // so several EnvelopeModels can share one undo history (e.g. pitch and
+    // amp on the same Sub layer, so a single "undo" reverts the most recent
+    // edit regardless of which envelope it touched). Must outlive this model.
+    // Defaults to null: owns its own UndoManager, exactly Phase 2's behaviour.
+    explicit EnvelopeModel(juce::UndoManager* externalUndoManager = nullptr);
 
     // Plain-value snapshot of one node, returned by value so callers (tests,
     // the evaluator) can inspect a node without touching the underlying tree.
@@ -94,7 +100,10 @@ public:
     void setState(const juce::ValueTree& newState);
 
 private:
-    juce::UndoManager undoManager;
+    // Declaration order matters: ownedUndoManager must be constructed before
+    // undoManager, since undoManager's initializer reads it.
+    std::unique_ptr<juce::UndoManager> ownedUndoManager; // null when using an external UndoManager
+    juce::UndoManager& undoManager;                       // always valid: *ownedUndoManager, or the external one
     juce::ValueTree tree { EnvelopeIDs::envelopeType };
 
     // Index at which a node with the given time should be inserted to keep
