@@ -26,7 +26,7 @@ juce_add_plugin(DOOF
     NEEDS_MIDI_INPUT            TRUE        # plugin receives MIDI notes to trigger the engine
     NEEDS_MIDI_OUTPUT           FALSE
     IS_MIDI_EFFECT              FALSE
-    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS TRUE    # needed for Cmd+Z/Cmd+Shift+Z undo/redo (Phase 3 Step 3a)
     COPY_PLUGIN_AFTER_BUILD     FALSE
     VST3_CATEGORIES             "Instrument|Synth"
 )

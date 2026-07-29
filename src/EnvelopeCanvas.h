@@ -9,24 +9,30 @@
 // vertical space despite having different units (pitch in Hz, amp unitless
 // [0,1]).
 //
-// Read-only in Step 2 (2a): draws the current model state only. Step 3 adds
-// drag/add/delete/reshape interaction directly on this component.
+// Step 3 (3a) adds click-drag node movement, wrapped in a single undo gesture
+// per drag, with a value/frequency readout that follows the cursor. Further
+// Step 3 bullets (add/delete/reshape/context menu) build on this.
 class EnvelopeCanvas : public juce::Component
 {
 public:
-    // pitchModel/ampModel must outlive this component. pitchRange/ampRange
-    // are each model's vertical axis extent in its own units, used only to
-    // normalize into the shared display space. visibleSeconds is the shared
-    // horizontal axis extent (Step 5's Length control will make this
-    // adjustable; fixed here for the initial render). processorForPlayHead
-    // must outlive this component; its play head (if any) drives the beat
-    // grid's tempo, read fresh on every paint so host tempo changes show up
-    // without this component needing to know when they happen.
-    EnvelopeCanvas(const EnvelopeModel& pitchModel, juce::Range<double> pitchRange,
-                   const EnvelopeModel& ampModel,   juce::Range<double> ampRange,
+    // pitchModel/ampModel must outlive this component and are edited directly
+    // by this component's drag interaction. pitchRange/ampRange are each
+    // model's vertical axis extent in its own units, used only to normalize
+    // into the shared display space. visibleSeconds is the shared horizontal
+    // axis extent (Step 5's Length control will make this adjustable; fixed
+    // here for the initial render). processorForPlayHead must outlive this
+    // component; its play head (if any) drives the beat grid's tempo, read
+    // fresh on every paint so host tempo changes show up without this
+    // component needing to know when they happen.
+    EnvelopeCanvas(EnvelopeModel& pitchModel, juce::Range<double> pitchRange,
+                   EnvelopeModel& ampModel,   juce::Range<double> ampRange,
                    double visibleSeconds, juce::AudioProcessor& processorForPlayHead);
 
     void paint(juce::Graphics&) override;
+
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
 
     // Switches the pitch curve's vertical mapping between linear and log
     // scale (§3.4: "Log / Linear vertical-axis toggle"). Log applies to
@@ -45,6 +51,13 @@ private:
     // Maps a time to an x pixel coordinate across the visible time range.
     float timeToX(double time) const;
 
+    // Inverse of timeToX: pixel x back to a time, NOT clamped to [0, visibleSeconds].
+    double xToTime(float x) const;
+
+    // Inverse of a value's position within toPixel's y mapping (log-scaled if
+    // useLog), NOT clamped to valueRange.
+    double yToValue(float y, juce::Range<double> valueRange, bool useLog) const;
+
     // Maps a (time, value) point into pixel space, normalizing value against
     // valueRange first (log-scaled if useLog) so different curves share the
     // canvas's full height. valueRange's lower bound must be > 0 when
@@ -62,11 +75,29 @@ private:
     // tempo yet.
     void drawBeatGrid(juce::Graphics& g) const;
 
-    const EnvelopeModel& pitchModel;
+    // Identifies a node handle under a pixel position, checking both curves
+    // and returning whichever node handle is nearest (within a fixed hit
+    // radius). index == -1 means nothing was hit; isPitch is meaningless
+    // in that case.
+    struct NodeHit { bool isPitch = false; int index = -1; };
+    NodeHit findNodeAt(juce::Point<float> pos) const;
+
+    // Draws the drag readout (§3.4: "Frequency readout while dragging
+    // nodes") near the dragged node's current position.
+    void drawDragReadout(juce::Graphics& g) const;
+
+    EnvelopeModel& pitchModel;
     juce::Range<double> pitchRange;
-    const EnvelopeModel& ampModel;
+    EnvelopeModel& ampModel;
     juce::Range<double> ampRange;
     double visibleSeconds;
     juce::AudioProcessor& processor;
     bool pitchLogScale = false;
+
+    // Drag state: which node (if any) is currently being dragged, and which
+    // model it belongs to. index == -1 means no active drag.
+    bool draggingPitch = false;
+    int draggedNodeIndex = -1;
+    juce::Point<float> readoutPos;
+    juce::String readoutText;
 };

@@ -60,10 +60,14 @@ public:
     // Declared public so the editor can attach sliders/buttons directly via attachment objects.
     juce::AudioProcessorValueTreeState apvts;
 
-    // Read-only access for the editor's canvas (Phase 3 Step 2). Non-const
-    // access for direct editing arrives with Step 3's node interaction.
+    // Read-only access for const contexts; non-const access lets the editor's
+    // canvas edit nodes directly (Phase 3 Step 3's drag/add/delete/reshape
+    // interaction). Overload resolution picks whichever the caller's own
+    // constness allows.
     const EnvelopeModel& getPitchEnvelopeModel() const { return pitchEnvelopeModel; }
     const EnvelopeModel& getAmpEnvelopeModel()   const { return ampEnvelopeModel; }
+    EnvelopeModel& getPitchEnvelopeModel() { return pitchEnvelopeModel; }
+    EnvelopeModel& getAmpEnvelopeModel()   { return ampEnvelopeModel; }
 
 private:
     // Builds the parameter layout passed to the APVTS constructor.

@@ -16,12 +16,23 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     {
         envelopeCanvas.setPitchLogScale(pitchLogToggle.getToggleState());
     };
+    undoButton.onClick = [this] { performUndo(); };
+    redoButton.onClick = [this] { performRedo(); };
 
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
     addAndMakeVisible(pitchLogToggle);
+    addAndMakeVisible(undoButton);
+    addAndMakeVisible(redoButton);
     setSize(800, 600);
+
+    // Undo/redo shortcuts need somewhere to land initially; a click on
+    // envelopeCanvas later re-targets focus there, but unhandled key presses
+    // bubble back up to this component regardless (JUCE's default focus
+    // traversal), so keyPressed() below still fires either way.
+    setWantsKeyboardFocus(true);
+    grabKeyboardFocus();
 }
 
 DOOFAudioProcessorEditor::~DOOFAudioProcessorEditor() = default;
@@ -43,6 +54,38 @@ void DOOFAudioProcessorEditor::paint(juce::Graphics& g)
 void DOOFAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
-    pitchLogToggle.setBounds(bounds.removeFromTop(24).removeFromLeft(160).reduced(2));
+    auto topBar = bounds.removeFromTop(24);
+    pitchLogToggle.setBounds(topBar.removeFromLeft(160).reduced(2));
+    undoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
+    redoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     envelopeCanvas.setBounds(bounds);
+}
+
+bool DOOFAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0))
+    {
+        performUndo();
+        return true;
+    }
+
+    if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+    {
+        performRedo();
+        return true;
+    }
+
+    return false;
+}
+
+void DOOFAudioProcessorEditor::performUndo()
+{
+    audioProcessor.getPitchEnvelopeModel().undo();
+    envelopeCanvas.repaint();
+}
+
+void DOOFAudioProcessorEditor::performRedo()
+{
+    audioProcessor.getPitchEnvelopeModel().redo();
+    envelopeCanvas.repaint();
 }

@@ -22,7 +22,17 @@ public:
     // Called whenever the window is resized; repositions all child components.
     void resized() override;
 
+    // Cmd+Z / Cmd+Shift+Z (Ctrl on Windows): undo/redo the shared envelope
+    // undo history (§Step 1's shared UndoManager).
+    bool keyPressed(const juce::KeyPress&) override;
+
 private:
+    // Shared by keyPressed and the undo/redo buttons. Either model's
+    // undo()/redo() reaches the same shared UndoManager (§Step 1), so which
+    // one is called through doesn't matter.
+    void performUndo();
+    void performRedo();
+
     // Back-reference to the processor; used to access parameters and engine state.
     // Guaranteed valid for the lifetime of this editor (processor outlives editor).
     DOOFAudioProcessor& audioProcessor;
@@ -34,6 +44,10 @@ private:
 
     // Log/Linear vertical-axis toggle for the pitch curve (§3.4).
     juce::ToggleButton pitchLogToggle { "Log Scale (Pitch)" };
+
+    // On-screen undo/redo, mirroring the Cmd+Z / Cmd+Shift+Z shortcuts.
+    juce::TextButton undoButton { "Undo" };
+    juce::TextButton redoButton { "Redo" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessorEditor)
 };
