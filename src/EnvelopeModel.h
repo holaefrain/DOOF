@@ -31,6 +31,8 @@ namespace EnvelopeIDs
     static const juce::Identifier cpOutValue  { "cpOutValue" };   // outgoing control point, value
     static const juce::Identifier cpInTime    { "cpInTime" };     // incoming control point, time
     static const juce::Identifier cpInValue   { "cpInValue" };    // incoming control point, value
+
+    static const juce::Identifier length      { "length" };       // work-area length, seconds (Phase 3 §3.4)
 }
 
 // EnvelopeModel — owns one node-based envelope as a ValueTree (schema above)
@@ -86,6 +88,14 @@ public:
 
     int getNumNodes() const { return tree.getNumChildren(); }
     Node getNode(int index) const;
+
+    // Work-area length in seconds (§3.4's "Length control"): the editable
+    // range's own duration, distinct from the fixed 4 s table domain (nodes
+    // may still exist beyond it — Length is a work-area boundary, not a
+    // hard data limit). Defaults to 0.5 s if never set. One undo step.
+    static constexpr double kDefaultLength = 0.5;
+    double getLength() const { return tree.getProperty(EnvelopeIDs::length, kDefaultLength); }
+    void setLength(double newLength);
 
     void undo() { undoManager.undo(); }
     void redo() { undoManager.redo(); }

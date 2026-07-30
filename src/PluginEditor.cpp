@@ -1,16 +1,17 @@
 #include "PluginEditor.h"
+#include "EnvelopeEvaluator.h"
 
 // Initialises the editor, stores the processor reference, and sets the default window size.
 // 800x600 is the flat developer skin starting size; resized to final dimensions in Phase 12.
 // Pitch range gives headroom above the default 150 Hz start; amp is always
-// [0,1]. The initial 0.5 s view shows the whole default envelope shape (pitch
-// sweep ends at 300 ms, amp tail is near-silent by 400 ms) with a little
-// margin; the user can zoom/pan from there (Step 4).
+// [0,1]. The initial view duration matches whichever model's Length (§Step 5)
+// is currently longer, so the whole work area is visible on load without
+// needing to zoom/pan first; the user can zoom/pan from there (Step 4).
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
       envelopeCanvas(p.getPitchEnvelopeModel(), juce::Range<double>(20.0, 220.0),
                      p.getAmpEnvelopeModel(),   juce::Range<double>(0.0, 1.0),
-                     0.5, p)
+                     juce::jmax(p.getPitchEnvelopeModel().getLength(), p.getAmpEnvelopeModel().getLength()), p)
 {
     pitchLogToggle.onClick = [this]
     {
@@ -29,6 +30,40 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
                                            : EnvelopeCanvas::ActiveCurve::amp);
     };
 
+    // Matches the range EnvelopeCanvas's own Length-handle drag enforces
+    // (kMinLength there, EnvelopeEvaluator::kTableDomainSeconds as the
+    // ceiling — there's nothing valid beyond the evaluator's table domain).
+    static constexpr double kMinLength = 0.01;
+
+    // Labels default to black text, invisible against the dark editor
+    // background (unlike TextButton/ComboBox, which use a lighter default
+    // under this LookAndFeel) — set explicit colours for all four.
+    for (auto* label : { &pitchLengthCaption, &pitchLengthValue, &ampLengthCaption, &ampLengthValue })
+        label->setColour(juce::Label::textColourId, juce::Colours::white);
+    pitchLengthValue.setColour(juce::Label::outlineColourId, juce::Colours::white.withAlpha(0.3f));
+    ampLengthValue.setColour(juce::Label::outlineColourId, juce::Colours::white.withAlpha(0.3f));
+
+    pitchLengthValue.setEditable(true);
+    pitchLengthValue.onTextChange = [this]
+    {
+        const double clamped = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds,
+                                             pitchLengthValue.getText().getDoubleValue());
+        audioProcessor.getPitchEnvelopeModel().setLength(clamped);
+        refreshLengthLabels();
+        envelopeCanvas.repaint();
+    };
+    ampLengthValue.setEditable(true);
+    ampLengthValue.onTextChange = [this]
+    {
+        const double clamped = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds,
+                                             ampLengthValue.getText().getDoubleValue());
+        audioProcessor.getAmpEnvelopeModel().setLength(clamped);
+        refreshLengthLabels();
+        envelopeCanvas.repaint();
+    };
+    envelopeCanvas.onLengthChanged = [this] { refreshLengthLabels(); };
+    refreshLengthLabels();
+
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
@@ -36,6 +71,10 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     addAndMakeVisible(undoButton);
     addAndMakeVisible(redoButton);
     addAndMakeVisible(editingCurveBox);
+    addAndMakeVisible(pitchLengthCaption);
+    addAndMakeVisible(pitchLengthValue);
+    addAndMakeVisible(ampLengthCaption);
+    addAndMakeVisible(ampLengthValue);
     setSize(800, 600);
 
     // Undo/redo shortcuts need somewhere to land initially; a click on
@@ -65,11 +104,19 @@ void DOOFAudioProcessorEditor::paint(juce::Graphics& g)
 void DOOFAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
+
     auto topBar = bounds.removeFromTop(24);
     pitchLogToggle.setBounds(topBar.removeFromLeft(160).reduced(2));
     undoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     redoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     editingCurveBox.setBounds(topBar.removeFromLeft(100).reduced(2));
+
+    auto secondBar = bounds.removeFromTop(24);
+    pitchLengthCaption.setBounds(secondBar.removeFromLeft(90).reduced(2));
+    pitchLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
+    ampLengthCaption.setBounds(secondBar.removeFromLeft(90).reduced(2));
+    ampLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
+
     envelopeCanvas.setBounds(bounds);
 }
 
@@ -100,4 +147,12 @@ void DOOFAudioProcessorEditor::performRedo()
 {
     audioProcessor.getPitchEnvelopeModel().redo();
     envelopeCanvas.repaint();
+}
+
+void DOOFAudioProcessorEditor::refreshLengthLabels()
+{
+    pitchLengthValue.setText(juce::String(audioProcessor.getPitchEnvelopeModel().getLength(), 3),
+                              juce::dontSendNotification);
+    ampLengthValue.setText(juce::String(audioProcessor.getAmpEnvelopeModel().getLength(), 3),
+                            juce::dontSendNotification);
 }

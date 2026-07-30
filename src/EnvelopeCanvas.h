@@ -17,7 +17,9 @@
 // Node, Reset Curve, Copy Curve, Paste Curve) — right-click no longer deletes
 // instantly as it did in 3b; that's now a menu item alongside the others.
 // Step 4 adds mouse-wheel zoom and empty-space-drag pan on the time axis —
-// a rendering-only transform of the view window, never the model.
+// a rendering-only transform of the view window, never the model. Step 5
+// adds a per-model "Length" (work-area duration) handle at the bottom of the
+// canvas for each curve, draggable to bound where nodes can be added/moved.
 class EnvelopeCanvas : public juce::Component
 {
 public:
@@ -56,6 +58,11 @@ public:
     // rendering-coordinate change: it never reads or writes the model, so it
     // cannot affect audio (drawEnvelope's model parameter is a const&).
     void setPitchLogScale(bool shouldUseLog);
+
+    // Called after either model's Length changes via the canvas handle drag,
+    // so external UI (e.g. the editor's numeric fields) can refresh. Not
+    // called for changes made some other way (e.g. directly via the model).
+    std::function<void()> onLengthChanged;
 
 private:
     // Points sampled per Bezier segment when drawing a curve — fine enough
@@ -136,6 +143,18 @@ private:
     struct CurveHit { bool isPitch = false; int segmentIndex = -1; double t = 0.0; };
     CurveHit findCurveAt(juce::Point<float> pos) const;
 
+    // Draws a curve's Length handle: a small triangle at the bottom of the
+    // canvas at its work-area boundary, plus a thin dashed line marking it.
+    void drawLengthHandle(juce::Graphics& g, const EnvelopeModel& model, juce::Colour colour) const;
+
+    // Hit-tests both curves' Length handles near the bottom edge. Neither
+    // isPitch is meaningful when hit is false.
+    struct LengthHandleHit { bool isPitch = false; bool hit = false; };
+    LengthHandleHit findLengthHandleAt(juce::Point<float> pos) const;
+
+    // Minimum Length, so the work area can never collapse to nothing.
+    static constexpr double kMinLength = 0.01;
+
     // Fraction applied to the drag delta while Shift is held, for precise
     // reshaping (3c: "modifier key for fine-drag").
     static constexpr double kFineDragScale = 0.2;
@@ -188,4 +207,9 @@ private:
     bool panning = false;
     double panOrigViewStart = 0.0;
     float panOrigMouseX = 0.0f;
+
+    // Length-handle drag state (Step 5). draggingLength == false means no
+    // active Length drag; lengthDragIsPitch says which curve's handle.
+    bool draggingLength = false;
+    bool lengthDragIsPitch = false;
 };

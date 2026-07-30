@@ -33,6 +33,11 @@ private:
     void performUndo();
     void performRedo();
 
+    // Re-reads both models' Length into the numeric fields below. Called
+    // after the canvas's Length handle is dragged, and whenever a field's
+    // own edit is committed (to reflect any clamping the model applied).
+    void refreshLengthLabels();
+
     // Back-reference to the processor; used to access parameters and engine state.
     // Guaranteed valid for the lifetime of this editor (processor outlives editor).
     DOOFAudioProcessor& audioProcessor;
@@ -51,6 +56,13 @@ private:
 
     // Which curve double-click-to-add-a-node targets (§Step 3, 3b).
     juce::ComboBox editingCurveBox;
+
+    // Numeric Length fields (§Step 5), alongside the canvas's draggable
+    // Length handles — both edit the same underlying EnvelopeModel::setLength().
+    juce::Label pitchLengthCaption { {}, "Pitch Len (s)" };
+    juce::Label pitchLengthValue;
+    juce::Label ampLengthCaption   { {}, "Amp Len (s)" };
+    juce::Label ampLengthValue;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessorEditor)
 };

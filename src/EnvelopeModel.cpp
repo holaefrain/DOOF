@@ -84,6 +84,17 @@ void EnvelopeModel::setControlPoints(int index, double cpOutTime, double cpOutVa
     node.setProperty(EnvelopeIDs::cpInValue,  cpInValue,  &undoManager);
 }
 
+void EnvelopeModel::setLength(double newLength)
+{
+    if (!inGesture)
+        undoManager.beginNewTransaction();
+    // Floor only — the model itself doesn't know the evaluator's table
+    // domain (that's an audio-side concern); callers (UI) enforce the full
+    // valid range. A non-positive length would break any [0, length] clamp
+    // callers build on top of this.
+    tree.setProperty(EnvelopeIDs::length, juce::jmax(1.0e-3, newLength), &undoManager);
+}
+
 EnvelopeModel::Node EnvelopeModel::getNode(int index) const
 {
     jassert(juce::isPositiveAndBelow(index, tree.getNumChildren()));
