@@ -26,13 +26,40 @@ DOOFAudioProcessor::DOOFAudioProcessor()
         .withInput("Sidechain", juce::AudioChannelSet::mono(),   false)),
       apvts(*this, nullptr, "DOOF_State", createParameterLayout())
 {
-    // Seed the out-of-the-box envelope shapes. Editing these becomes possible
-    // once the Phase 3 canvas exists; until then this is the only sound DOOF makes.
-    DefaultEnvelopes::seedPitch(pitchEnvelopeModel);
-    DefaultEnvelopes::seedAmp(ampEnvelopeModel);
+    // Build the layers and seed every one with the out-of-the-box envelope
+    // shapes — including the four that default to Off, so switching one to Sub
+    // makes a sound immediately instead of silence from an empty envelope.
+    for (int i = 0; i < getNumLayers(); ++i)
+    {
+        layers[(size_t) i] = std::make_unique<Layer>(envelopeUndoManager);
+        DefaultEnvelopes::seedPitch(layers[(size_t) i]->pitchModel);
+        DefaultEnvelopes::seedAmp(layers[(size_t) i]->ampModel);
+    }
+
+    // Seeding above went through the normal undoable edit path, so it left one
+    // transaction per added node in the history — roughly 70 across ten models,
+    // which would both fill the entire 30-step cap with factory setup and let
+    // Cmd+Z at startup dismantle the default patch. The factory patch is a
+    // starting point, not a user edit, so the history starts empty. Same
+    // reasoning as EnvelopeModel::setState() clearing it after a preset load.
+    envelopeUndoManager.clearUndoHistory();
 }
 
 DOOFAudioProcessor::~DOOFAudioProcessor() = default;
+
+// Bounds-checked in debug; index must come from a loop over getNumLayers() or
+// a validated selection, never straight from untrusted state.
+Layer& DOOFAudioProcessor::getLayer(int index)
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+    return *layers[(size_t) index];
+}
+
+const Layer& DOOFAudioProcessor::getLayer(int index) const
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+    return *layers[(size_t) index];
+}
 
 // Build the initial parameter layout for the APVTS.
 // Called once from the constructor initialiser list; adding a parameter here
@@ -97,7 +124,11 @@ DOOFAudioProcessor::createParameterLayout()
 // The DC blocker coefficient is computed here so it adapts to any sample rate.
 void DOOFAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
 {
-    voice.prepare(sampleRate);
+    // Every layer's voice is prepared, including Off ones — a layer switched on
+    // mid-session must be ready to sound without waiting for another
+    // prepareToPlay call from the host.
+    for (int i = 0; i < getNumLayers(); ++i)
+        getLayer(i).voice.prepare(sampleRate);
 
     // DC blocker: y[n] = x[n] - x[n-1] + R * y[n-1]
     // R = 1 - 2π * fc / sr  where fc ≈ 10 Hz removes any synthesis DC offset.
@@ -143,9 +174,14 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 {
     juce::ScopedNoDenormals noDenormals;
 
+    // Still renders layer 0 alone, exactly as it did before the layer array
+    // existed, so this step changes no audio. The per-layer mix (type, level,
+    // mute/solo, summing) arrives in Step 3a.
+    auto& layer = getLayer(0);
+
     // Load the current envelope snapshot once for this whole block (§2: the
     // audio thread loads the atomic pointer once per block, never per-sample).
-    voice.setSnapshot(envelopePublisher.getSnapshot());
+    layer.voice.setSnapshot(layer.publisher.getSnapshot());
 
     // Step 1 — handle MIDI events.
     // Note-off is intentionally ignored: the amp envelope handles the voice decay.
@@ -153,7 +189,7 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     {
         const auto msg = metadata.getMessage();
         if (msg.isNoteOn())
-            voice.noteOn(msg.getNoteNumber());
+            layer.voice.noteOn(msg.getNoteNumber());
     }
 
     // Step 2 — render samples.
@@ -163,7 +199,7 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 
     for (int i = 0; i < buffer.getNumSamples(); ++i)
     {
-        float sample = voice.processSample() * gain;
+        float sample = layer.voice.processSample() * gain;
 
         // Apply DC blocker to remove any slowly-drifting offset from the synthesis.
         float blocked = sample - dcBlockerX + dcBlockerR * dcBlockerY;
@@ -194,11 +230,13 @@ void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     juce::ValueTree root { PresetIDs::rootType };
     root.addChild(apvts.copyState(), -1, nullptr);
 
-    auto pitchCopy = pitchEnvelopeModel.getValueTree().createCopy();
+    // Still writes layer 0's envelopes only, in Phase 3's flat layout — Step 4
+    // re-nests this under per-layer children and covers all five.
+    auto pitchCopy = getLayer(0).pitchModel.getValueTree().createCopy();
     pitchCopy.setProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag, nullptr);
     root.addChild(pitchCopy, -1, nullptr);
 
-    auto ampCopy = ampEnvelopeModel.getValueTree().createCopy();
+    auto ampCopy = getLayer(0).ampModel.getValueTree().createCopy();
     ampCopy.setProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag, nullptr);
     root.addChild(ampCopy, -1, nullptr);
 
@@ -226,11 +264,11 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 
     const auto pitchState = root.getChildWithProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag);
     if (pitchState.isValid())
-        pitchEnvelopeModel.setState(pitchState);
+        getLayer(0).pitchModel.setState(pitchState);
 
     const auto ampState = root.getChildWithProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag);
     if (ampState.isValid())
-        ampEnvelopeModel.setState(ampState);
+        getLayer(0).ampModel.setState(ampState);
 }
 
 // Entry point called by the host to create a new plugin instance.

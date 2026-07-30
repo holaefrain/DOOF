@@ -100,6 +100,12 @@ public:
     void undo() { undoManager.undo(); }
     void redo() { undoManager.redo(); }
 
+    // Whether there is anything to undo/redo in the shared history. Note this
+    // reflects the whole shared UndoManager, not just this model's own edits,
+    // so it answers "is the undo button live" rather than "did I change".
+    bool canUndo() const { return undoManager.canUndo(); }
+    bool canRedo() const { return undoManager.canRedo(); }
+
     // Begins a gesture: starts one undo transaction that every mutating call
     // (addNode/moveNode/deleteNode/setControlPoints) made before the matching
     // endGesture() coalesces into, instead of each getting its own step. Used

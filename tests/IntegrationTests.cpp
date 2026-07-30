@@ -41,8 +41,8 @@ public:
         processor.prepareToPlay(44100.0, 512);
 
         // State A: deliberately reshaped away from the defaults.
-        processor.getPitchEnvelopeModel().moveNode(0, 0.0, 200.0);
-        processor.getAmpEnvelopeModel().moveNode(1, 0.002, 0.9);
+        processor.getLayer(0).pitchModel.moveNode(0, 0.0, 200.0);
+        processor.getLayer(0).ampModel.moveNode(1, 0.002, 0.9);
 
         auto renderNote = [&](int numSamples)
         {
@@ -64,8 +64,8 @@ public:
         processor.getStateInformation(saved);
 
         // State B: a different alteration, made after saving.
-        processor.getPitchEnvelopeModel().moveNode(0, 0.0, 50.0);
-        processor.getAmpEnvelopeModel().deleteNode(0);
+        processor.getLayer(0).pitchModel.moveNode(0, 0.0, 50.0);
+        processor.getLayer(0).ampModel.deleteNode(0);
 
         processor.setStateInformation(saved.getData(), (int) saved.getSize());
 
@@ -187,6 +187,111 @@ private:
 };
 
 static Phase4ParameterLayoutTest phase4ParameterLayoutTest;
+
+// Phase4LayerConstructionTest — verifies the five-layer array itself (§3.2):
+// every layer is really constructed, seeded, and publishing its own snapshot,
+// including the four that default to Off.
+//
+// The Off layers matter as much as layer 0 here: they're seeded precisely so
+// that switching one to Sub produces a kick immediately rather than silence
+// from an empty envelope, and that only holds if construction seeded all five.
+class Phase4LayerConstructionTest : public juce::UnitTest
+{
+public:
+    Phase4LayerConstructionTest() : juce::UnitTest("Phase4LayerConstruction") {}
+
+    void runTest() override
+    {
+        testEveryLayerIsSeededAndPublishing();
+        testUndoHistoryStartsEmpty();
+        testLayersAreIndependent();
+    }
+
+private:
+    void testEveryLayerIsSeededAndPublishing()
+    {
+        beginTest("(a) All five layers are seeded with the default envelopes and publishing");
+
+        DOOFAudioProcessor processor;
+        processor.prepareToPlay(44100.0, 512);
+
+        const int expectedPitchNodes = processor.getLayer(0).pitchModel.getNumNodes();
+        const int expectedAmpNodes   = processor.getLayer(0).ampModel.getNumNodes();
+        expect(expectedPitchNodes > 0, "Layer 0's pitch envelope should have been seeded");
+        expect(expectedAmpNodes   > 0, "Layer 0's amp envelope should have been seeded");
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto& layer = processor.getLayer(i);
+            const auto which = " (layer " + juce::String(i) + ")";
+
+            expectEquals(layer.pitchModel.getNumNodes(), expectedPitchNodes,
+                         "Pitch envelope not seeded identically" + which);
+            expectEquals(layer.ampModel.getNumNodes(), expectedAmpNodes,
+                         "Amp envelope not seeded identically" + which);
+
+            // A layer that isn't publishing would hand its voice a null
+            // snapshot and render silence even once switched to Sub.
+            const auto* snapshot = layer.publisher.getSnapshot();
+            expect(snapshot != nullptr, "Publisher has no snapshot" + which);
+
+            if (snapshot != nullptr)
+                expect(snapshot->pitchTable[0] > 0.0f,
+                       "Seeded pitch table should start above 0 Hz" + which);
+        }
+    }
+
+    void testUndoHistoryStartsEmpty()
+    {
+        beginTest("(b) The factory patch is not sitting in the undo history");
+
+        DOOFAudioProcessor processor;
+
+        // Seeding ten models goes through the normal undoable edit path, which
+        // would otherwise leave ~70 transactions queued up: enough to fill the
+        // whole 30-step cap with factory setup, and to let Cmd+Z at startup
+        // start dismantling the default patch.
+        //
+        // This asks the UndoManager directly rather than calling undo() and
+        // watching for a changed node count. The manager is shared across all
+        // ten models, so the newest transaction after seeding belongs to the
+        // *last* model seeded — an undo() would pop that one and leave layer 0
+        // untouched, making a node-count check pass while the history was still
+        // full. (Confirmed: the node-count version of this test did not fail
+        // when clearUndoHistory() was temporarily removed.)
+        expect(! processor.getLayer(0).pitchModel.canUndo(),
+               "Undo history is not empty at startup, so seeding left transactions behind");
+        expect(! processor.getLayer(0).pitchModel.canRedo(),
+               "Redo history is not empty at startup");
+    }
+
+    void testLayersAreIndependent()
+    {
+        beginTest("(c) Editing one layer's envelope does not touch another's");
+
+        DOOFAudioProcessor processor;
+        processor.prepareToPlay(44100.0, 512);
+
+        const auto valueOnLayer = [&processor](int index)
+        {
+            return processor.getLayer(index).pitchModel.getNode(0).value;
+        };
+
+        const double originalOnLayer1 = valueOnLayer(1);
+        processor.getLayer(0).pitchModel.moveNode(0, 0.0, 999.0);
+
+        expectWithinAbsoluteError(valueOnLayer(0), 999.0, 1.0e-9, "Layer 0's own edit did not apply");
+        expectWithinAbsoluteError(valueOnLayer(1), originalOnLayer1, 1.0e-9,
+                                   "Editing layer 0 also changed layer 1 — the layers share state");
+
+        // The edited layer must republish; the untouched one must not be forced to.
+        const auto* snapshot = processor.getLayer(0).publisher.getSnapshot();
+        expect(snapshot != nullptr && snapshot->pitchTable[0] > 900.0f,
+               "Layer 0's snapshot did not pick up its own edit");
+    }
+};
+
+static Phase4LayerConstructionTest phase4LayerConstructionTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

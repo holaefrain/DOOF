@@ -1,8 +1,9 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "SubVoice.h"
-#include "EnvelopeModel.h"
-#include "EnvelopePublisher.h"
+#include "Layer.h"
+#include "LayerAudibility.h"
+#include <array>
+#include <memory>
 
 // DOOFAudioProcessor — the audio engine and plugin host.
 // Owns the signal path and satisfies the JUCE AudioProcessor contract so the
@@ -60,24 +61,23 @@ public:
     // Declared public so the editor can attach sliders/buttons directly via attachment objects.
     juce::AudioProcessorValueTreeState apvts;
 
-    // Read-only access for const contexts; non-const access lets the editor's
-    // canvas edit nodes directly (Phase 3 Step 3's drag/add/delete/reshape
-    // interaction). Overload resolution picks whichever the caller's own
-    // constness allows.
-    const EnvelopeModel& getPitchEnvelopeModel() const { return pitchEnvelopeModel; }
-    const EnvelopeModel& getAmpEnvelopeModel()   const { return ampEnvelopeModel; }
-    EnvelopeModel& getPitchEnvelopeModel() { return pitchEnvelopeModel; }
-    EnvelopeModel& getAmpEnvelopeModel()   { return ampEnvelopeModel; }
+    // Access to one layer's models and voice (§3.2). index must be in
+    // [0, LayerAudibility::kNumLayers). Non-const access lets the editor's
+    // canvas edit that layer's nodes directly (Phase 3 Step 3's
+    // drag/add/delete/reshape interaction); overload resolution picks whichever
+    // the caller's own constness allows.
+    Layer&       getLayer(int index);
+    const Layer& getLayer(int index) const;
+
+    // Number of layers, so callers (the layer strip, tests) don't hardcode it.
+    static constexpr int getNumLayers() { return LayerAudibility::kNumLayers; }
 
 private:
     // Builds the parameter layout passed to the APVTS constructor.
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    // The single mono voice: one sine oscillator with pitch/amp envelopes and choke logic.
-    SubVoice voice;
-
-    // Shared undo history for both envelope models below (Phase 3 §3.4: "Undo
+    // Shared undo history for every layer's envelope models (Phase 3 §3.4: "Undo
     // / redo, 30 steps"), so a single undo reverts the most recent edit
     // chronologically, regardless of whether it touched pitch or amp.
     // UndoManager(1, 30): the tiny 1-unit budget is exceeded almost
@@ -86,26 +86,17 @@ private:
     // floor — a real hard cap, not just a hint (see juce_UndoManager.cpp's
     // dropOldTransactionsIfTooLarge()).
     //
-    // Declaration order matters: this must be constructed before the two
-    // models below, which take a pointer to it in their constructor calls —
-    // C++ constructs members in declaration order regardless of initializer
-    // list order.
+    // Declaration order matters: this must be constructed before the layers
+    // below, whose models take a pointer to it — C++ constructs members in
+    // declaration order regardless of initializer list order.
     juce::UndoManager envelopeUndoManager { 1, 30 };
 
-    // Node-based pitch and amp envelope data (§3.1). Message-thread only — the
-    // audio thread never touches these directly, only the snapshots published
-    // through envelopePublisher below.
-    //
-    // Declaration order matters: envelopePublisher stores references to these
-    // two models, so they must be declared (and therefore constructed) after
-    // envelopeUndoManager but before envelopePublisher — reversing either
-    // would leave a dangling reference during construction.
-    EnvelopeModel pitchEnvelopeModel { &envelopeUndoManager };
-    EnvelopeModel ampEnvelopeModel   { &envelopeUndoManager };
-
-    // Bridges the two models above to the audio thread: rebuilds and publishes
-    // a new EnvelopeSnapshot via atomic-pointer swap on every edit (§2).
-    EnvelopePublisher envelopePublisher { pitchEnvelopeModel, ampEnvelopeModel };
+    // The five layers (§3.2), each owning its own envelope models, publisher
+    // and voice. Held by unique_ptr because Layer is neither default-
+    // constructible nor movable (its publisher holds references to the two
+    // models beside it), so a plain std::array<Layer, N> can't be formed;
+    // these are allocated once in the constructor, never on the audio thread.
+    std::array<std::unique_ptr<Layer>, LayerAudibility::kNumLayers> layers;
 
     // DC blocker state variables.
     // Implements y[n] = x[n] - x[n-1] + R * y[n-1] — a one-pole high-pass (~10 Hz) that

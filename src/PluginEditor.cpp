@@ -9,9 +9,9 @@
 // needing to zoom/pan first; the user can zoom/pan from there (Step 4).
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
-      envelopeCanvas(p.getPitchEnvelopeModel(), juce::Range<double>(20.0, 220.0),
-                     p.getAmpEnvelopeModel(),   juce::Range<double>(0.0, 1.0),
-                     juce::jmax(p.getPitchEnvelopeModel().getLength(), p.getAmpEnvelopeModel().getLength()), p)
+      envelopeCanvas(p.getLayer(0).pitchModel, juce::Range<double>(20.0, 220.0),
+                     p.getLayer(0).ampModel,   juce::Range<double>(0.0, 1.0),
+                     juce::jmax(p.getLayer(0).pitchModel.getLength(), p.getLayer(0).ampModel.getLength()), p)
 {
     pitchLogToggle.onClick = [this]
     {
@@ -48,7 +48,7 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     {
         const double clamped = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds,
                                              pitchLengthValue.getText().getDoubleValue());
-        audioProcessor.getPitchEnvelopeModel().setLength(clamped);
+        audioProcessor.getLayer(0).pitchModel.setLength(clamped);
         refreshLengthLabels();
         envelopeCanvas.repaint();
     };
@@ -57,7 +57,7 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     {
         const double clamped = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds,
                                              ampLengthValue.getText().getDoubleValue());
-        audioProcessor.getAmpEnvelopeModel().setLength(clamped);
+        audioProcessor.getLayer(0).ampModel.setLength(clamped);
         refreshLengthLabels();
         envelopeCanvas.repaint();
     };
@@ -194,20 +194,20 @@ bool DOOFAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
 
 void DOOFAudioProcessorEditor::performUndo()
 {
-    audioProcessor.getPitchEnvelopeModel().undo();
+    audioProcessor.getLayer(0).pitchModel.undo();
     envelopeCanvas.repaint();
 }
 
 void DOOFAudioProcessorEditor::performRedo()
 {
-    audioProcessor.getPitchEnvelopeModel().redo();
+    audioProcessor.getLayer(0).pitchModel.redo();
     envelopeCanvas.repaint();
 }
 
 void DOOFAudioProcessorEditor::refreshLengthLabels()
 {
-    pitchLengthValue.setText(juce::String(audioProcessor.getPitchEnvelopeModel().getLength(), 3),
+    pitchLengthValue.setText(juce::String(audioProcessor.getLayer(0).pitchModel.getLength(), 3),
                               juce::dontSendNotification);
-    ampLengthValue.setText(juce::String(audioProcessor.getAmpEnvelopeModel().getLength(), 3),
+    ampLengthValue.setText(juce::String(audioProcessor.getLayer(0).ampModel.getLength(), 3),
                             juce::dontSendNotification);
 }
