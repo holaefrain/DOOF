@@ -1,6 +1,9 @@
 #include "PluginProcessor.h"
+#include "ParamIDs.h"
+#include "LayerAudibility.h"
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 // IntegrationTests — full-engine tests that need the real PluginProcessor
@@ -94,6 +97,96 @@ public:
 };
 
 static Phase3PresetRoundTripTest phase3PresetRoundTripTest;
+
+// Phase4ParameterLayoutTest — pins the APVTS parameter contract for the mixer
+// (§3.2, §3.3): every expected ID exists, and the out-of-the-box defaults are
+// what the engine and every earlier phase's render assertions assume.
+//
+// The expected IDs are written out as literal strings rather than obtained
+// from ParamIDs' builder functions, deliberately. §2 forbids ever renaming a
+// parameter ID once a preset has been saved against it; a test that asked the
+// builder for the ID would follow any rename along and keep passing, proving
+// nothing. Spelling them out means changing the format breaks this test, which
+// is exactly the alarm we want.
+class Phase4ParameterLayoutTest : public juce::UnitTest
+{
+public:
+    Phase4ParameterLayoutTest() : juce::UnitTest("Phase4ParameterLayout") {}
+
+    void runTest() override
+    {
+        testAllExpectedParametersExist();
+        testDefaultsPreserveThePrePhase4Patch();
+    }
+
+private:
+    // Layer count is spelled out here for the same reason as the IDs below.
+    static constexpr int kExpectedLayers = 5;
+    static_assert(kExpectedLayers == LayerAudibility::kNumLayers,
+                  "This test's hardcoded layer count has drifted from LayerAudibility::kNumLayers");
+
+    void testAllExpectedParametersExist()
+    {
+        beginTest("(a) All 21 expected parameter IDs exist, and nothing extra");
+
+        DOOFAudioProcessor processor;
+
+        juce::StringArray expected { "sub.gain" };
+        for (int i = 1; i <= kExpectedLayers; ++i)
+        {
+            const auto n = juce::String(i);
+            expected.add("layer" + n + ".type");
+            expected.add("layer" + n + ".level");
+            expected.add("layer" + n + ".mute");
+            expected.add("layer" + n + ".solo");
+        }
+
+        expectEquals(expected.size(), 21, "1 master gain + 5 layers x 4 controls");
+
+        for (const auto& id : expected)
+            expect(processor.apvts.getParameter(id) != nullptr,
+                   "Missing expected parameter ID: " + id);
+
+        // Catches an accidentally *added* or duplicated parameter too, not just
+        // a missing one.
+        expectEquals(processor.getParameters().size(), expected.size(),
+                     "Processor exposes a different number of parameters than expected");
+    }
+
+    void testDefaultsPreserveThePrePhase4Patch()
+    {
+        beginTest("(b) Defaults: layer 1 Sub at unity, layers 2-5 Off, master still 0.8");
+
+        DOOFAudioProcessor processor;
+
+        auto raw = [&processor](const juce::String& id)
+        {
+            auto* value = processor.apvts.getRawParameterValue(id);
+            return value != nullptr ? value->load() : std::numeric_limits<float>::quiet_NaN();
+        };
+
+        // The single gain that existed before the mixer, unchanged — so every
+        // Phase 1/2/3 render assertion still describes the default patch.
+        expectWithinAbsoluteError(raw("sub.gain"), 0.8f, 1.0e-6f);
+
+        expectWithinAbsoluteError(raw("layer1.type"), (float) (int) ParamIDs::LayerType::sub, 1.0e-6f);
+        for (int i = 2; i <= kExpectedLayers; ++i)
+            expectWithinAbsoluteError(raw("layer" + juce::String(i) + ".type"),
+                                       (float) (int) ParamIDs::LayerType::off, 1.0e-6f);
+
+        // Unity per layer, so the master gain remains the only attenuation in
+        // the default path and one enabled layer sounds exactly as it used to.
+        for (int i = 1; i <= kExpectedLayers; ++i)
+        {
+            const auto n = juce::String(i);
+            expectWithinAbsoluteError(raw("layer" + n + ".level"), 1.0f, 1.0e-6f);
+            expectWithinAbsoluteError(raw("layer" + n + ".mute"),  0.0f, 1.0e-6f);
+            expectWithinAbsoluteError(raw("layer" + n + ".solo"),  0.0f, 1.0e-6f);
+        }
+    }
+};
+
+static Phase4ParameterLayoutTest phase4ParameterLayoutTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

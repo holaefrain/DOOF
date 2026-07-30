@@ -1,14 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "DefaultEnvelopes.h"
-
-// ── Stable parameter IDs ───────────────────────────────────────────────────────
-// IDs follow the namespaced format from §2 of project-reference.md.
-// Never rename or remove an ID once any preset has been saved with it.
-namespace ParamIDs
-{
-    static const juce::String subGain = "sub.gain"; // master output gain for the Sub layer
-}
+#include "ParamIDs.h"
+#include "LayerAudibility.h"
 
 // State-serialisation schema (Phase 3 Step 7): wraps apvts state and both
 // envelope models' trees into one root for getStateInformation/setStateInformation
@@ -48,13 +42,53 @@ DOOFAudioProcessor::createParameterLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
-    // sub.gain — linear master gain for the sub layer output, range [0, 1].
+    // sub.gain — linear master gain applied after the layer mix, range [0, 1].
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { ParamIDs::subGain, 1 },
         "Sub Gain",
         juce::NormalisableRange<float>(0.0f, 1.0f),
         0.8f // default: 80% level
     ));
+
+    // Per-layer mixer parameters (§3.2, §3.3): type, level, mute, solo.
+    //
+    // Defaults are chosen so the out-of-the-box patch is exactly what it was
+    // before the mixer existed: layer 1 is a Sub at unity level, layers 2-5
+    // are Off, and the 0.8 master above is still the only gain in the path.
+    // That keeps every Phase 1/2/3 render assertion valid unchanged.
+    for (int i = 0; i < LayerAudibility::kNumLayers; ++i)
+    {
+        const auto layerNumber = juce::String(i + 1);
+        const auto defaultType = (i == 0) ? ParamIDs::LayerType::sub : ParamIDs::LayerType::off;
+
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { ParamIDs::layerType(i), 1 },
+            "Layer " + layerNumber + " Type",
+            ParamIDs::layerTypeChoices(),
+            (int) defaultType
+        ));
+
+        // Linear, matching sub.gain's units. A dB-scaled display is a
+        // skinning concern (Phase 12), not a change to the stored value.
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerLevel(i), 1 },
+            "Layer " + layerNumber + " Level",
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            1.0f
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { ParamIDs::layerMute(i), 1 },
+            "Layer " + layerNumber + " Mute",
+            false
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { ParamIDs::layerSolo(i), 1 },
+            "Layer " + layerNumber + " Solo",
+            false
+        ));
+    }
 
     return layout;
 }
