@@ -43,6 +43,7 @@ target_sources(DOOF
         src/EnvelopeEvaluator.cpp # precomputes an EnvelopeModel into a lookup table
         src/EnvelopePublisher.cpp # atomic-pointer snapshot publish path to the audio thread
         src/DefaultEnvelopes.cpp  # out-of-the-box pitch/amp envelope shapes
+        src/LayerAudibility.cpp   # §3.3 mute/solo audibility rule, shared by engine + GUI
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -86,6 +87,7 @@ target_sources(DOOFTests
         src/EnvelopeEvaluator.cpp # lookup-table builder under test
         src/EnvelopePublisher.cpp # atomic-pointer publish path under test
         src/DefaultEnvelopes.cpp # out-of-the-box envelope shapes, shared with production
+        src/LayerAudibility.cpp  # §3.3 audibility rule under test (no JUCE dependency at all)
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
@@ -131,6 +133,7 @@ target_sources(DOOFIntegrationTests
         src/EnvelopeEvaluator.cpp
         src/EnvelopePublisher.cpp
         src/DefaultEnvelopes.cpp
+        src/LayerAudibility.cpp
 )
 
 target_include_directories(DOOFIntegrationTests PRIVATE src)
