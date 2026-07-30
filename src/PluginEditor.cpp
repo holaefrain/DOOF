@@ -64,6 +64,57 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     envelopeCanvas.onLengthChanged = [this] { refreshLengthLabels(); };
     refreshLengthLabels();
 
+    // Save/Load write and read the exact same state getStateInformation/
+    // setStateInformation use for host project save (§7a) — just to a .doof
+    // file instead of the host's project data. The FileChooser is kept alive
+    // by the shared_ptr captured into its own async callback.
+    savePresetButton.onClick = [this]
+    {
+        auto chooser = std::make_shared<juce::FileChooser>(
+            "Save DOOF preset...",
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+            "*.doof");
+
+        chooser->launchAsync(juce::FileBrowserComponent::saveMode
+                              | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+            [this, chooser](const juce::FileChooser& fc)
+            {
+                const auto file = fc.getResult();
+                if (file == juce::File{})
+                    return;
+
+                juce::MemoryBlock block;
+                audioProcessor.getStateInformation(block);
+                file.replaceWithData(block.getData(), block.getSize());
+            });
+    };
+
+    loadPresetButton.onClick = [this]
+    {
+        auto chooser = std::make_shared<juce::FileChooser>(
+            "Load DOOF preset...",
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+            "*.doof");
+
+        chooser->launchAsync(juce::FileBrowserComponent::openMode
+                              | juce::FileBrowserComponent::canSelectFiles,
+            [this, chooser](const juce::FileChooser& fc)
+            {
+                const auto file = fc.getResult();
+                if (file == juce::File{})
+                    return;
+
+                juce::MemoryBlock block;
+                if (! file.loadFileAsData(block))
+                    return;
+
+                audioProcessor.setStateInformation(block.getData(), (int) block.getSize());
+                refreshLengthLabels();
+                envelopeCanvas.repaint();
+            });
+    };
+
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
@@ -75,6 +126,8 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     addAndMakeVisible(pitchLengthValue);
     addAndMakeVisible(ampLengthCaption);
     addAndMakeVisible(ampLengthValue);
+    addAndMakeVisible(savePresetButton);
+    addAndMakeVisible(loadPresetButton);
     setSize(800, 600);
 
     // Undo/redo shortcuts need somewhere to land initially; a click on
@@ -116,6 +169,8 @@ void DOOFAudioProcessorEditor::resized()
     pitchLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
     ampLengthCaption.setBounds(secondBar.removeFromLeft(90).reduced(2));
     ampLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
+    savePresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
+    loadPresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
 
     envelopeCanvas.setBounds(bounds);
 }

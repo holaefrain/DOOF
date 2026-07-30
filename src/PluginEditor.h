@@ -64,5 +64,11 @@ private:
     juce::Label ampLengthCaption   { {}, "Amp Len (s)" };
     juce::Label ampLengthValue;
 
+    // Minimal preset save/load (§Step 7b): writes/reads the exact same state
+    // getStateInformation/setStateInformation use for host project save, to
+    // a standalone .doof file.
+    juce::TextButton savePresetButton { "Save..." };
+    juce::TextButton loadPresetButton { "Load..." };
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessorEditor)
 };

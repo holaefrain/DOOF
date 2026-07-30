@@ -112,9 +112,23 @@ EnvelopeModel::Node EnvelopeModel::getNode(int index) const
 
 // Replaces the model state wholesale (e.g. preset load) and clears undo
 // history — a loaded state is a fresh starting point, not a user edit.
+//
+// Mutates the existing tree in place rather than reassigning it (`tree =
+// newState`). A plain reassignment repoints `tree` at newState's underlying
+// shared data without firing any ValueTree::Listener callback, which would
+// silently orphan EnvelopePublisher's listener (attached once, in its
+// constructor, to whatever object `tree` referenced at that time) — from
+// then on the audio thread would stop receiving snapshot updates entirely,
+// including for edits made *after* the load. In-place mutation keeps the
+// listener attached and fires it correctly for every change.
 void EnvelopeModel::setState(const juce::ValueTree& newState)
 {
     jassert(newState.hasType(EnvelopeIDs::envelopeType));
-    tree = newState;
+
+    tree.removeAllChildren(nullptr);
+    tree.copyPropertiesFrom(newState, nullptr);
+    for (int i = 0; i < newState.getNumChildren(); ++i)
+        tree.addChild(newState.getChild(i).createCopy(), i, nullptr);
+
     undoManager.clearUndoHistory();
 }

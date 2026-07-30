@@ -10,6 +10,19 @@ namespace ParamIDs
     static const juce::String subGain = "sub.gain"; // master output gain for the Sub layer
 }
 
+// State-serialisation schema (Phase 3 Step 7): wraps apvts state and both
+// envelope models' trees into one root for getStateInformation/setStateInformation
+// and the .doof preset file. pitchEnvelopeModel and ampEnvelopeModel are both
+// EnvelopeIDs::envelopeType ("ENVELOPE"), so curveProp distinguishes them —
+// same rule as APVTS parameter IDs: never rename once a preset has shipped.
+namespace PresetIDs
+{
+    static const juce::Identifier rootType  { "DOOFState" };
+    static const juce::Identifier curveProp { "curve" };
+    static const juce::String pitchCurveTag = "pitch";
+    static const juce::String ampCurveTag   = "amp";
+}
+
 // Construct the processor, declare the bus layout, and initialise the APVTS.
 // Output is always stereo (FX domain is stereo end-to-end per §2).
 // Sidechain input is declared optional-mono here; it becomes active in Phase 10 (TRIGGER).
@@ -135,21 +148,55 @@ juce::AudioProcessorEditor* DOOFAudioProcessor::createEditor()
     return new DOOFAudioProcessorEditor(*this);
 }
 
-// Serialises current APVTS state to XML and packs it into destData for host project save.
+// Serialises APVTS state plus both envelope models' node data to XML and
+// packs it into destData for host project save (and, via getStateAsMemoryBlock/
+// setStateFromMemoryBlock-style reuse, the .doof preset file — see 7b).
+// apvts.copyState() already returns an independent copy safe to reparent;
+// the envelope models' own getValueTree() is their live tree, so those are
+// explicitly copied first — adding a live tree as a child here would steal
+// its parent link and corrupt the model still using it.
 void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
-    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    juce::ValueTree root { PresetIDs::rootType };
+    root.addChild(apvts.copyState(), -1, nullptr);
+
+    auto pitchCopy = pitchEnvelopeModel.getValueTree().createCopy();
+    pitchCopy.setProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag, nullptr);
+    root.addChild(pitchCopy, -1, nullptr);
+
+    auto ampCopy = ampEnvelopeModel.getValueTree().createCopy();
+    ampCopy.setProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag, nullptr);
+    root.addChild(ampCopy, -1, nullptr);
+
+    std::unique_ptr<juce::XmlElement> xml(root.createXml());
     copyXmlToBinary(*xml, destData);
 }
 
-// Restores APVTS state from a blob previously written by getStateInformation.
-// Guards against malformed blobs with a tag-name check before replacing state.
+// Restores APVTS and both envelope models from a blob previously written by
+// getStateInformation. Guards against malformed/older blobs at each step —
+// a blob missing the envelope data (e.g. a pre-Phase-3 save) still restores
+// whatever it does have instead of failing entirely.
 void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
-    if (xml && xml->hasTagName(apvts.state.getType()))
-        apvts.replaceState(juce::ValueTree::fromXml(*xml));
+    if (xml == nullptr)
+        return;
+
+    const auto root = juce::ValueTree::fromXml(*xml);
+    if (! root.hasType(PresetIDs::rootType))
+        return;
+
+    const auto apvtsState = root.getChildWithName(apvts.state.getType());
+    if (apvtsState.isValid())
+        apvts.replaceState(apvtsState);
+
+    const auto pitchState = root.getChildWithProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag);
+    if (pitchState.isValid())
+        pitchEnvelopeModel.setState(pitchState);
+
+    const auto ampState = root.getChildWithProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag);
+    if (ampState.isValid())
+        ampEnvelopeModel.setState(ampState);
 }
 
 // Entry point called by the host to create a new plugin instance.
