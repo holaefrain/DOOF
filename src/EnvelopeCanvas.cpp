@@ -11,6 +11,11 @@ EnvelopeCanvas::EnvelopeCanvas(EnvelopeModel& pitchModelIn, juce::Range<double> 
       ampModel(ampModelIn),     ampRange(ampRangeIn),
       viewDuration(initialViewDuration), processor(processorForPlayHead)
 {
+    // Opaque + self-drawn background (paint() below) means a repaint of this
+    // component no longer requires the parent editor to repaint behind it.
+    setOpaque(true);
+    lastKnownBpm = getCurrentBpm();
+    startTimerHz(kTimerHz);
 }
 
 float EnvelopeCanvas::timeToX(double time) const
@@ -66,27 +71,43 @@ void EnvelopeCanvas::setPitchLogScale(bool shouldUseLog)
     repaint();
 }
 
-void EnvelopeCanvas::drawBeatGrid(juce::Graphics& g) const
+double EnvelopeCanvas::getCurrentBpm() const
 {
     auto* playHead = processor.getPlayHead();
     if (playHead == nullptr)
-        return;
+        return 0.0;
 
     const auto position = playHead->getPosition();
     if (! position.hasValue())
-        return;
+        return 0.0;
 
     const auto bpm = position->getBpm();
-    if (! bpm.hasValue() || *bpm <= 0.0)
+    return (bpm.hasValue() && *bpm > 0.0) ? *bpm : 0.0;
+}
+
+void EnvelopeCanvas::drawBeatGrid(juce::Graphics& g) const
+{
+    const double bpm = getCurrentBpm();
+    if (bpm <= 0.0)
         return;
 
-    const double beatSeconds = 60.0 / *bpm;
+    const double beatSeconds = 60.0 / bpm;
     const double viewEnd     = viewStartTime + viewDuration;
     const double firstBeat   = std::ceil(viewStartTime / beatSeconds) * beatSeconds;
 
     g.setColour(juce::Colours::white.withAlpha(0.15f));
     for (double t = firstBeat; t <= viewEnd; t += beatSeconds)
         g.drawVerticalLine((int) timeToX(t), 0.0f, (float) getHeight());
+}
+
+void EnvelopeCanvas::timerCallback()
+{
+    const double bpm = getCurrentBpm();
+    if (std::abs(bpm - lastKnownBpm) > 1.0e-6)
+    {
+        lastKnownBpm = bpm;
+        repaint();
+    }
 }
 
 void EnvelopeCanvas::drawEnvelope(juce::Graphics& g, const EnvelopeModel& model,
@@ -165,6 +186,10 @@ void EnvelopeCanvas::drawLengthHandle(juce::Graphics& g, const EnvelopeModel& mo
 
 void EnvelopeCanvas::paint(juce::Graphics& g)
 {
+    // Opaque component (Step 6): must fill its own background now, since the
+    // parent editor's dark background is no longer composited behind it.
+    g.fillAll(juce::Colour(0xff1a1a1a));
+
     drawBeatGrid(g);
     drawEnvelope(g, pitchModel, pitchRange, juce::Colours::cyan,   pitchLogScale);
     drawEnvelope(g, ampModel,   ampRange,   juce::Colours::orange, false); // amp always linear

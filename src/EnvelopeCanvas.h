@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_events/juce_events.h>
 #include "EnvelopeModel.h"
 
 // EnvelopeCanvas — the central canvas (project-architecture.md §3.4): renders
@@ -20,7 +21,11 @@
 // a rendering-only transform of the view window, never the model. Step 5
 // adds a per-model "Length" (work-area duration) handle at the bottom of the
 // canvas for each curve, draggable to bound where nodes can be added/moved.
-class EnvelopeCanvas : public juce::Component
+// Step 6 adds a ~30 fps Timer that repaints when the host's tempo changes
+// (the only state this component reads without an edit driving a repaint)
+// and makes the component opaque with its own background fill, so redraws
+// no longer require the parent editor to repaint behind it.
+class EnvelopeCanvas : public juce::Component, private juce::Timer
 {
 public:
     // Which curve double-click-on-empty-space adds a new node to. Chosen
@@ -36,8 +41,10 @@ public:
     // Length control will add a separate notion of the model's own working
     // duration; this is purely the initial camera position). processorForPlayHead
     // must outlive this component; its play head (if any) drives the beat
-    // grid's tempo, read fresh on every paint so host tempo changes show up
-    // without this component needing to know when they happen.
+    // grid's tempo. Repaints are otherwise only triggered by edits, so the
+    // Step 6 timer polls the tempo and repaints when it changes — the one
+    // piece of state this component displays that isn't driven by a
+    // user-initiated call into this class.
     EnvelopeCanvas(EnvelopeModel& pitchModel, juce::Range<double> pitchRange,
                    EnvelopeModel& ampModel,   juce::Range<double> ampRange,
                    double initialViewDuration, juce::AudioProcessor& processorForPlayHead);
@@ -100,6 +107,17 @@ private:
     // BPM"). Silently skipped if the host hasn't provided a play head or a
     // tempo yet.
     void drawBeatGrid(juce::Graphics& g) const;
+
+    // Reads the host's current BPM, same as drawBeatGrid; a free function
+    // would duplicate that logic, so this is the shared lookup both use.
+    // Returns 0.0 if no play head or tempo is available.
+    double getCurrentBpm() const;
+
+    // Polls the host tempo at ~30 fps (kTimerHz) and repaints only when it
+    // has actually changed since the last tick — most ticks do nothing.
+    void timerCallback() override;
+    static constexpr int kTimerHz = 30;
+    double lastKnownBpm = 0.0;
 
     // Identifies a node handle under a pixel position, checking both curves
     // and returning whichever node handle is nearest (within a fixed hit
