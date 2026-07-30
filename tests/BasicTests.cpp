@@ -4,6 +4,7 @@
 #include "EnvelopeEvaluator.h"
 #include "EnvelopePublisher.h"
 #include "DefaultEnvelopes.h"
+#include "LayerAudibility.h"
 
 #include <cmath>
 #include <vector>
@@ -855,6 +856,149 @@ private:
 };
 
 static EnvelopePublisherTest envelopePublisherTest;
+
+// LayerAudibilityTest — Phase 4 §6 Verify: "Unit-test the audibility function
+// against all 16 combinations of the §3.3 truth table."
+//
+// §3.3's table itself is 4 flag-combinations x 2 solo-states = 8 cells. The
+// 16 come from the fourth input the table doesn't tabulate but the rule still
+// depends on: whether the layer is Off (§3.2's per-layer type). So the input
+// space is (isOff, mute, solo, anySoloed) = 2^4, and every one is asserted
+// below.
+//
+// The expected column is a literal transcription of the doc, not computed
+// from anything — if it were derived by formula it would only restate the
+// implementation and could pass while both were wrong in the same way. Two
+// rows (solo set while anySoloed is false) are unreachable through the real
+// UI, since setting a layer's solo makes anyLayerSoloed() true by definition;
+// they're asserted anyway so the function is total over its inputs.
+class LayerAudibilityTest : public juce::UnitTest
+{
+public:
+    LayerAudibilityTest() : juce::UnitTest("LayerAudibility") {}
+
+    void runTest() override
+    {
+        testAllSixteenCombinations();
+        testAnyLayerSoloed();
+        testFlagsOverloadAgrees();
+    }
+
+private:
+    // (a) Every combination of the four inputs, against §3.3 as written.
+    void testAllSixteenCombinations()
+    {
+        // No "§" in any string literal reaching juce::String: JUCE asserts on
+        // non-ASCII char* input (juce_String.cpp's CharPointer_ASCII check),
+        // since it can't know the source encoding. Comments are unaffected.
+        beginTest("(a) All 16 combinations match the section 3.3 truth table");
+
+        struct Row { bool isOff, mute, solo, anySoloed, expected; };
+
+        // Rows 1-8: layer in the mix (isOff == false) — §3.3's table verbatim,
+        // read left column first: neither / solo / mute / solo+mute, each with
+        // no layer soloed then >=1 layer soloed.
+        // Rows 9-16: same eight with the layer Off — silent in every case,
+        // since an Off layer contributes nothing to the mix at all.
+        static constexpr Row rows[] =
+        {
+            { false, false, false, false, true  }, // neither,     no solo  -> audible
+            { false, false, false, true,  false }, // neither,     soloing  -> silent
+            { false, false, true,  false, true  }, // solo,        no solo  -> audible
+            { false, false, true,  true,  true  }, // solo,        soloing  -> audible
+            { false, true,  false, false, false }, // mute,        no solo  -> silent
+            { false, true,  false, true,  false }, // mute,        soloing  -> silent
+            { false, true,  true,  false, false }, // solo+mute,   no solo  -> silent (mute wins)
+            { false, true,  true,  true,  false }, // solo+mute,   soloing  -> silent (mute wins)
+
+            { true,  false, false, false, false },
+            { true,  false, false, true,  false },
+            { true,  false, true,  false, false },
+            { true,  false, true,  true,  false },
+            { true,  true,  false, false, false },
+            { true,  true,  false, true,  false },
+            { true,  true,  true,  false, false },
+            { true,  true,  true,  true,  false },
+        };
+
+        // A compile-time property of the table, so it fails the build rather
+        // than the test run if a row is ever dropped.
+        static_assert(sizeof(rows) / sizeof(rows[0]) == 16,
+                      "The truth table must cover all 2^4 combinations of the four inputs");
+
+        for (const auto& row : rows)
+        {
+            const bool actual = LayerAudibility::isAudible(row.isOff, row.mute, row.solo, row.anySoloed);
+            expect(actual == row.expected,
+                   "isAudible(isOff=" + juce::String((int) row.isOff)
+                     + ", mute="      + juce::String((int) row.mute)
+                     + ", solo="      + juce::String((int) row.solo)
+                     + ", anySoloed=" + juce::String((int) row.anySoloed)
+                     + ") should be " + (row.expected ? "audible" : "silent"));
+        }
+    }
+
+    // (b) anyLayerSoloed over the whole 5-layer array, including §3.3's
+    // "multi-solo: any number soloed at once" and the Off-layer exclusion.
+    void testAnyLayerSoloed()
+    {
+        beginTest("(b) anyLayerSoloed: none / one / several / soloed-but-Off");
+
+        std::array<LayerAudibility::LayerFlags, LayerAudibility::kNumLayers> layers {};
+        expect(! LayerAudibility::anyLayerSoloed(layers), "A fresh array has nothing soloed");
+
+        layers[2].solo = true;
+        expect(LayerAudibility::anyLayerSoloed(layers), "One soloed layer counts");
+
+        layers[0].solo = true;
+        layers[4].solo = true;
+        expect(LayerAudibility::anyLayerSoloed(layers), "Multi-solo counts (any number soloed at once)");
+
+        // Off layers produce no sound, so their solo flag must not silence the
+        // layers that do — see anyLayerSoloed()'s own comment for why this is
+        // our reading of a case §3.3 leaves open.
+        for (auto& layer : layers)
+            layer.isOff = true;
+        expect(! LayerAudibility::anyLayerSoloed(layers),
+               "Layers that are soloed but Off must not count as soloed");
+
+        // A single in-mix soloed layer is enough, even with Off soloed layers present.
+        layers[3].isOff = false;
+        layers[3].solo  = true;
+        expect(LayerAudibility::anyLayerSoloed(layers),
+               "One in-mix soloed layer counts even alongside soloed-but-Off layers");
+
+        // Mute is irrelevant here: a muted-but-soloed layer still silences
+        // everyone else (it just isn't audible itself — row 7/8 of table (a)).
+        std::array<LayerAudibility::LayerFlags, LayerAudibility::kNumLayers> muted {};
+        muted[1].solo = true;
+        muted[1].mute = true;
+        expect(LayerAudibility::anyLayerSoloed(muted),
+               "A soloed layer still counts as soloed even when also muted");
+    }
+
+    // (c) The LayerFlags overload is a pass-through, not a second copy of the
+    // rule that could drift from the four-bool version.
+    void testFlagsOverloadAgrees()
+    {
+        beginTest("(c) LayerFlags overload agrees with the four-bool version everywhere");
+
+        for (int i = 0; i < 16; ++i)
+        {
+            LayerAudibility::LayerFlags flags;
+            flags.isOff = (i & 8) != 0;
+            flags.mute  = (i & 4) != 0;
+            flags.solo  = (i & 2) != 0;
+            const bool anySoloed = (i & 1) != 0;
+
+            expect(LayerAudibility::isAudible(flags, anySoloed)
+                     == LayerAudibility::isAudible(flags.isOff, flags.mute, flags.solo, anySoloed),
+                   "Overload disagreed at combination index " + juce::String(i));
+        }
+    }
+};
+
+static LayerAudibilityTest layerAudibilityTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 
