@@ -81,6 +81,27 @@ LayerAudibility::LayerFlags DOOFAudioProcessor::getLayerFlags(int index) const
     return flags;
 }
 
+// Gathers every layer's flags so the multi-solo question can be answered across
+// the whole mix (§3.3), not one layer at a time.
+bool DOOFAudioProcessor::isAnyLayerSoloed() const
+{
+    std::array<LayerAudibility::LayerFlags, LayerAudibility::kNumLayers> flags;
+    for (int i = 0; i < getNumLayers(); ++i)
+        flags[(size_t) i] = getLayerFlags(i);
+
+    return LayerAudibility::anyLayerSoloed(flags);
+}
+
+float DOOFAudioProcessor::getTargetGain(int index, bool anySoloed) const
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+
+    if (! LayerAudibility::isAudible(getLayerFlags(index), anySoloed))
+        return 0.0f;
+
+    return layerParams[(size_t) index].level->load();
+}
+
 DOOFAudioProcessor::~DOOFAudioProcessor() = default;
 
 // Bounds-checked in debug; index must come from a loop over getNumLayers() or
@@ -166,6 +187,16 @@ void DOOFAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*
     for (int i = 0; i < getNumLayers(); ++i)
         getLayer(i).voice.prepare(sampleRate);
 
+    // Each layer's gain starts *at* its target rather than ramping up to it, so
+    // opening a session doesn't fade the first note in from silence. Only later
+    // changes ramp.
+    const bool anySoloed = isAnyLayerSoloed();
+    for (int i = 0; i < getNumLayers(); ++i)
+    {
+        layerGain[(size_t) i].reset(sampleRate, kGainRampSeconds);
+        layerGain[(size_t) i].setCurrentAndTargetValue(getTargetGain(i, anySoloed));
+    }
+
     // DC blocker: y[n] = x[n] - x[n-1] + R * y[n-1]
     // R = 1 - 2π * fc / sr  where fc ≈ 10 Hz removes any synthesis DC offset.
     dcBlockerR = 1.0f - static_cast<float>(
@@ -200,8 +231,10 @@ bool DOOFAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) cons
 // ScopedNoDenormals suppresses denormal CPU spikes in long tails and reverb decays.
 //
 // Processing order:
-//   1. Consume all MIDI events for this block (block-accurate; sample-accurate in a later phase).
-//   2. For each sample: tick the voice, apply gain, apply DC blocker, write to L+R.
+//   1. Resolve each layer's target gain for this block (type, level, mute/solo).
+//   2. Consume all MIDI events (block-accurate; sample-accurate in a later phase).
+//   3. For each sample: tick every layer's voice, sum them through their smoothed
+//      gains, apply master gain, apply DC blocker, write to L+R.
 //
 // Real-time safety guarantee: no allocations, no locks, no file/network I/O in this function
 // or any function it calls.  Verify with AddressSanitizer's alloc hooks when running headless.
@@ -210,32 +243,65 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // Still renders layer 0 alone, exactly as it did before the layer array
-    // existed, so this step changes no audio. The per-layer mix (type, level,
-    // mute/solo, summing) arrives in Step 3a.
-    auto& layer = getLayer(0);
+    // Step 1 — mixer state for this block.
+    //
+    // anySoloed is evaluated once across every layer before any individual
+    // layer's audibility is decided: §3.3's rule is about the mix as a whole,
+    // so asking per-layer mid-loop could see it change halfway through.
+    const bool anySoloed = isAnyLayerSoloed();
 
-    // Load the current envelope snapshot once for this whole block (§2: the
-    // audio thread loads the atomic pointer once per block, never per-sample).
-    layer.voice.setSnapshot(layer.publisher.getSnapshot());
+    for (int i = 0; i < getNumLayers(); ++i)
+    {
+        auto& layer = getLayer(i);
 
-    // Step 1 — handle MIDI events.
+        // Load each snapshot once for the whole block (§2: the audio thread
+        // loads the atomic pointer once per block, never per-sample).
+        layer.voice.setSnapshot(layer.publisher.getSnapshot());
+
+        // Ramped, not assigned — see kGainRampSeconds.
+        layerGain[(size_t) i].setTargetValue(getTargetGain(i, anySoloed));
+    }
+
+    // Step 2 — handle MIDI events.
     // Note-off is intentionally ignored: the amp envelope handles the voice decay.
+    //
+    // Note-ons go to every layer's voice, including Off ones. A layer switched
+    // on part-way through a note then plays from the right point in the
+    // envelope rather than restarting, and switching one on between notes costs
+    // nothing since its voice is already idle.
     for (const auto metadata : midiMessages)
     {
         const auto msg = metadata.getMessage();
         if (msg.isNoteOn())
-            layer.voice.noteOn(msg.getNoteNumber());
+            for (int i = 0; i < getNumLayers(); ++i)
+                getLayer(i).voice.noteOn(msg.getNoteNumber());
     }
 
-    // Step 2 — render samples.
+    // Step 3 — render and mix.
+    //
+    // Layers are summed straight, with no division by the number of active
+    // layers: normalising would change the sound of every other layer whenever
+    // one was enabled. Five layers at unity can therefore exceed full scale,
+    // which is expected — taming that is the Phase 9 master limiter's job, and
+    // nothing here clamps or wraps.
     const float gain = masterGainParam->load();
     auto* leftCh  = buffer.getWritePointer(0);
     auto* rightCh = buffer.getWritePointer(1);
 
     for (int i = 0; i < buffer.getNumSamples(); ++i)
     {
-        float sample = layer.voice.processSample() * gain;
+        // Every layer is ticked every sample, even silent ones, and never
+        // skipped. Skipping would freeze that layer's envelope time, so
+        // unmuting mid-note would resume from a stale position instead of where
+        // the note actually is; it would also bypass the gain ramp and turn
+        // switching a layer Off mid-tail into an instant cut. Idle voices
+        // already cost almost nothing.
+        float mixed = 0.0f;
+        for (int layerIndex = 0; layerIndex < getNumLayers(); ++layerIndex)
+            mixed += getLayer(layerIndex).voice.processSample()
+                       * layerGain[(size_t) layerIndex].getNextValue();
+
+        float sample = mixed * gain;
 
         // Apply DC blocker to remove any slowly-drifting offset from the synthesis.
         float blocked = sample - dcBlockerX + dcBlockerR * dcBlockerY;

@@ -123,6 +123,30 @@ private:
     // ParamIDs::LayerType index and the bools against 0.5 as a midpoint.
     LayerAudibility::LayerFlags getLayerFlags(int index) const;
 
+    // Whether any layer in the mix has solo engaged, per §3.3's multi-solo
+    // rule. Computed across all layers, so it must be evaluated once before
+    // asking about any individual layer.
+    bool isAnyLayerSoloed() const;
+
+    // The gain a layer should be heading toward: its level parameter when
+    // audible per §3.3, otherwise silence. Shared by prepareToPlay (which sets
+    // it instantly) and processBlock (which ramps to it), so the two can't
+    // disagree about what a layer's gain ought to be.
+    float getTargetGain(int index, bool anySoloed) const;
+
+    // Per-layer output gain: the layer's level when audible, 0 when not,
+    // ramped rather than stepped. Without the ramp, toggling mute while a tail
+    // rings would cut the waveform mid-cycle (an audible click), and automating
+    // a level would produce zipper noise. Lives here rather than in SubVoice
+    // because SubVoice.h deliberately includes only juce_core, so it stays
+    // testable in the lean DOOFTests target — SmoothedValue is juce_audio_basics.
+    std::array<juce::SmoothedValue<float>, LayerAudibility::kNumLayers> layerGain;
+
+    // Ramp length for the gains above. Matches SubVoice's own choke fade, which
+    // is already known to be short enough not to soften a kick's transient and
+    // long enough to avoid a click.
+    static constexpr double kGainRampSeconds = 0.005;
+
     // DC blocker state variables.
     // Implements y[n] = x[n] - x[n-1] + R * y[n-1] — a one-pole high-pass (~10 Hz) that
     // removes any DC offset introduced by the synthesis or FX chain.
