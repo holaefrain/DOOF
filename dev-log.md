@@ -23,7 +23,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 0 | Project scaffolding | Complete | ✅ |
 | 1 | Engine skeleton + one audible sub | Complete | ✅ |
 | 2 | Node-based envelope engine | Complete | ✅ |
-| 3 | Envelope canvas (GUI) + minimal preset save/load | Not started | — |
+| 3 | Envelope canvas (GUI) + minimal preset save/load | Complete | ✅ |
 | 4 | Layers + mixer | Not started | — |
 | 5 | Click layers | Not started | — |
 | 6 | Sub tuning + phase tools | Not started | — |
@@ -88,7 +88,43 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 - **Design lesson found (the actual point of the spike):** `EnvelopeModel::moveNode` can return a *different* index than the one passed in, since it re-sorts nodes when a drag crosses a neighbour's time. The spike initially discarded that return value, so after a crossover the tracked "dragged node" index went stale and subsequent drag updates silently moved the wrong node. **Requirement for Step 3's real drag implementation: always reassign the tracked node index from `moveNode`'s return value, every call, for the whole gesture — never assume the index is stable.**
 - Spike code fully reverted (`PluginEditor.h/.cpp` back to pre-spike state) once it had taught us both lessons above — it was never meant to ship.
 
-**Next steps:** Phase 3 Step 1 — shared undo history (`EnvelopeModel` takes an optional external `UndoManager*`; `PluginProcessor` owns one shared, 30-step-capped instance for both pitch and amp) + a `beginGesture()`/`endGesture()` API so a whole drag coalesces into one undo step. See the full step-by-step Phase 3 plan drafted this session.
+**Phase 3 built, step by step (continuing this session):**
+
+1. **Shared undo history + gesture API** — `EnvelopeModel` takes an optional external `UndoManager*` (null → owns its own, preserving Phase 2 behaviour). `PluginProcessor` owns one shared `UndoManager` (capped at 30 transactions) passed to both `pitchEnvelopeModel` and `ampEnvelopeModel`. `beginGesture()`/`endGesture()` let a whole continuous edit (a drag) coalesce into one undo step. Unit-tested: multi-move-in-gesture undoes as one step, non-gesture edits keep their own steps, undo across pitch/amp is chronological.
+2. **Canvas rendering** — `EnvelopeCanvas` (new): one canvas overlays pitch (cyan) + amp (orange) curves on a shared time axis, each normalized into its own value range (§3.4: "Central canvas: pitch + amp curves"). Beat grid reads host BPM via `AudioPlayHead`, redrawn on tempo change. Log/Linear vertical-axis toggle for the pitch curve only (amp always linear — its range includes exact 0, where log is undefined); a pure rendering-coordinate change, provably unable to touch the model or audio.
+3. **Node interaction** — click-drag moves a node (gesture-wrapped, with a live value/frequency readout); double-click empty space adds a node to whichever curve is selected in an "Editing: Pitch/Amp" dropdown; double-click or right-click a node deletes it (right-click later became a context menu, see below); click-drag the curve line between nodes reshapes its Bezier control points (De Casteljau basis-weight math keeps the curve passing through the cursor), Shift held for fine-drag; right-click anywhere opens a context menu (Delete Node when on a node, Reset Curve, Copy Curve, Paste Curve — Paste added ad hoc mid-session, not originally planned, enabling cross-curve pitch↔amp shape copying via the system clipboard). Cmd+Z/Cmd+Shift+Z plus on-screen Undo/Redo buttons.
+4. **Zoom & pan** — mouse wheel zooms centered on the cursor; left-drag on empty canvas space (unclaimed by any other gesture) pans. Both are pure view-window transforms — verified by direct code inspection that neither code path calls any `EnvelopeModel` mutator.
+5. **Length control** — a per-model "Length" (work-area duration) stored as a `ValueTree` property, undoable, adjustable via both a draggable canvas handle and a numeric field (kept in sync both ways). Node add/move is now bounded to `[0, Length]` instead of the full 4 s table domain. Initial camera view on load = `max(pitch length, amp length)`.
+6. **Repaint strategy** — a 30 fps timer polls host tempo and repaints only when it's actually changed (most ticks do nothing — the beat grid previously only updated when an edit happened to trigger a repaint). `EnvelopeCanvas` is now opaque with its own background fill, so its repaints no longer require the parent editor to redraw behind it.
+7. **Minimal preset save/load** — `getStateInformation`/`setStateInformation` now nest both envelope models' trees (tagged by a `curve` property, since both share the same `ENVELOPE` type) alongside `apvts` state, under one `DOOFState` root. "Save…"/"Load…" buttons write/read the identical serialised state to/from a `.doof` file via `FileChooser`.
+8. **Final verify pass** — see below.
+
+**Bugs/issues found and fixed during Phase 3:**
+
+1. **`EDITOR_WANTS_KEYBOARD_FOCUS FALSE`** (set back in Phase 0, before any keyboard interaction existed) was blocking some VST3 hosts from ever routing key events to the editor — Cmd+Z did nothing. Flipped to `TRUE`.
+2. **Curve hit-test measured distance to discrete sample points, not the drawn line** — with only 32 samples per segment, most of the visible curve fell in gaps too far from any sample point for a tight hit radius to catch, so clicking directly on the visible line often didn't register. Fixed to measure point-to-segment distance against the same piecewise-linear segments the path is actually drawn with.
+3. **`EnvelopeModel::setState()` reassigned `tree` (`tree = newState`) instead of mutating it in place.** A plain reassignment doesn't fire any `ValueTree::Listener` callback, which silently orphaned `EnvelopePublisher`'s listener (attached once, in its constructor, to whatever object `tree` referenced at that time) — **after any preset load, the audio thread would stop receiving snapshot updates entirely**, including for edits made after the load, even though the canvas kept displaying them correctly (it reads the model directly, not through the publisher). Found by the Step 7c integration test itself — exactly the kind of bug a full render-based test is for. Fixed by mutating the tree in place (`removeAllChildren` + `copyPropertiesFrom` + re-adding children).
+4. **JUCE's macOS Standalone wrapper never calls `AudioProcessor::setPlayHead()`** — that only happens under `JUCE_IOS` for Inter-App Audio — so `getPlayHead()` is always null in Standalone on this platform. The beat grid can only be verified in a real DAW host, not Standalone (the plan's own Step 8a note assumed otherwise).
+5. **`juce::Label` defaults to black text**, invisible against the dark editor background (unlike `TextButton`/`ComboBox`, which default to a visible colour under this LookAndFeel) — the Length fields were invisible until explicit colours were set.
+
+**Decisions made this session (Phase 3):**
+- One canvas overlaying both curves (not two separate `EnvelopeCanvas` instances), matching §3.4's "Central canvas" literally over Step 2a's own more ambiguous wording.
+- Right-click opens a context menu everywhere (on a node: adds "Delete Node"; off a node: just Reset/Copy/Paste), superseding 3b's original instant-delete-on-right-click.
+- "Reset Curve" restores the *whole* curve to its `DefaultEnvelopes` shape, not just the clicked node/segment.
+- Panning is plain left-drag on empty canvas space, no modifier key — that gesture was otherwise unclaimed.
+- Added a second CTest target, `DOOFIntegrationTests`, for tests needing the full `PluginProcessor`/`PluginEditor`/`EnvelopeCanvas` chain (and therefore the full `audio_utils`/`audio_processors`/`gui_basics`/`dsp` dependency chain) — keeps `DOOFTests` lean and fast for day-to-day iteration (per its own long-standing design intent) while giving full-engine tests like the save/reload null-match a permanent, re-runnable home. Expected to be reused by later phases needing similar full-engine checks.
+
+**Verify result (all six §6 Phase 3 checks):**
+- Audible pitch-drag: confirmed manually (drag a pitch node down while triggering notes — pitch audibly drops, curve follows the cursor).
+- Log/lin null test: verified by code inspection — `setPitchLogScale` only sets a bool and repaints, never touches either model.
+- BPM grid alignment: confirmed manually in a real DAW at 128 and 178 BPM — gridline shifts to the correct position each time.
+- Zoom/pan node count: verified by code inspection — `mouseWheelMove` and the panning branch of `mouseDrag`/`mouseUp` only touch `viewStartTime`/`viewDuration`/`clampView()`, never any `EnvelopeModel` mutator.
+- Undo-one-step-reverts-whole-drag: permanent unit tests (`EnvelopeModelTest` (i)/(j)/(k)) plus manual confirmation via the Undo button and Cmd+Z.
+- Save/reload null-match: new permanent `Phase3PresetRoundTripTest` in `DOOFIntegrationTests`, passing.
+
+`DOOFTests`: 26/26 passing. `DOOFIntegrationTests`: 1/1 passing. `DOOF_VST3` and `DOOF_Standalone` both build clean, zero warnings.
+
+**Next steps:** Phase 4 — Layers + mixer.
 
 ---
 
