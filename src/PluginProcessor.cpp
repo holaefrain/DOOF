@@ -43,6 +43,42 @@ DOOFAudioProcessor::DOOFAudioProcessor()
     // starting point, not a user edit, so the history starts empty. Same
     // reasoning as EnvelopeModel::setState() clearing it after a preset load.
     envelopeUndoManager.clearUndoHistory();
+
+    // Resolve every parameter pointer once, so processBlock never looks a
+    // parameter up by string. These stay valid for the processor's lifetime.
+    masterGainParam = apvts.getRawParameterValue(ParamIDs::subGain);
+    jassert(masterGainParam != nullptr);
+
+    for (int i = 0; i < getNumLayers(); ++i)
+    {
+        auto& cached = layerParams[(size_t) i];
+        cached.type  = apvts.getRawParameterValue(ParamIDs::layerType(i));
+        cached.level = apvts.getRawParameterValue(ParamIDs::layerLevel(i));
+        cached.mute  = apvts.getRawParameterValue(ParamIDs::layerMute(i));
+        cached.solo  = apvts.getRawParameterValue(ParamIDs::layerSolo(i));
+
+        // A null here means an ID in ParamIDs disagrees with the one
+        // createParameterLayout() registered — the mixer would then silently
+        // read nothing for that control.
+        jassert(cached.type != nullptr && cached.level != nullptr
+                 && cached.mute != nullptr && cached.solo != nullptr);
+    }
+}
+
+// Snapshot of one layer's mixer flags for the audibility rule. Off is compared
+// against the LayerType index rather than a bare integer so the mapping stays
+// tied to the enum; the bools use a 0.5 midpoint, which is how JUCE's own
+// AudioParameterBool converts its normalised value back to a boolean.
+LayerAudibility::LayerFlags DOOFAudioProcessor::getLayerFlags(int index) const
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+    const auto& cached = layerParams[(size_t) index];
+
+    LayerAudibility::LayerFlags flags;
+    flags.isOff = ((int) cached.type->load() == (int) ParamIDs::LayerType::off);
+    flags.mute  = (cached.mute->load() > 0.5f);
+    flags.solo  = (cached.solo->load() > 0.5f);
+    return flags;
 }
 
 DOOFAudioProcessor::~DOOFAudioProcessor() = default;
@@ -193,7 +229,7 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     }
 
     // Step 2 — render samples.
-    const float gain = apvts.getRawParameterValue(ParamIDs::subGain)->load();
+    const float gain = masterGainParam->load();
     auto* leftCh  = buffer.getWritePointer(0);
     auto* rightCh = buffer.getWritePointer(1);
 

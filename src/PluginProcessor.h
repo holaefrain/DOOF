@@ -98,6 +98,31 @@ private:
     // these are allocated once in the constructor, never on the audio thread.
     std::array<std::unique_ptr<Layer>, LayerAudibility::kNumLayers> layers;
 
+    // Cached APVTS raw-value pointers, resolved once in the constructor.
+    //
+    // apvts.getRawParameterValue(id) hashes a string to find the parameter,
+    // which is fine on the message thread but wasteful in processBlock — with
+    // 21 parameters the mixer would do that lookup 21 times per block, forever.
+    // The pointers APVTS hands back are stable for the processor's lifetime, so
+    // resolving them once and reading the atomics directly is both faster and
+    // free of any string work on the audio thread.
+    struct LayerParams
+    {
+        std::atomic<float>* type  = nullptr;
+        std::atomic<float>* level = nullptr;
+        std::atomic<float>* mute  = nullptr;
+        std::atomic<float>* solo  = nullptr;
+    };
+
+    std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;
+    std::atomic<float>* masterGainParam = nullptr;
+
+    // Reads one layer's mixer flags from the cached pointers above. Audio-thread
+    // safe: plain atomic loads, no strings, no allocation. Choice and bool
+    // parameters both surface as floats here, so type is compared against the
+    // ParamIDs::LayerType index and the bools against 0.5 as a midpoint.
+    LayerAudibility::LayerFlags getLayerFlags(int index) const;
+
     // DC blocker state variables.
     // Implements y[n] = x[n] - x[n-1] + R * y[n-1] — a one-pole high-pass (~10 Hz) that
     // removes any DC offset introduced by the synthesis or FX chain.
