@@ -71,6 +71,14 @@ public:
     // called for changes made some other way (e.g. directly via the model).
     std::function<void()> onLengthChanged;
 
+    // Points the canvas at a different layer's two models (§4.6: selecting a layer swaps the
+    // contextual panel). Both must outlive this component. Any interaction in progress is
+    // cancelled first - see cancelActiveGesture for why that is not optional.
+    //
+    // The view window is deliberately left alone: zoom and pan are camera state, not per-layer
+    // data, and holding position makes comparing one layer against another far easier.
+    void setModels(EnvelopeModel& newPitchModel, EnvelopeModel& newAmpModel);
+
 private:
     // The model for one curve. Almost every interaction here already knows which curve it is
     // acting on as a bool, so this replaces the pitch-or-amp ternary that was otherwise repeated
@@ -79,6 +87,17 @@ private:
     // inside a const method.
     EnvelopeModel&       modelFor(bool isPitch)       { return isPitch ? *pitchModel : *ampModel; }
     const EnvelopeModel& modelFor(bool isPitch) const { return isPitch ? *pitchModel : *ampModel; }
+
+    // Ends any gesture in progress on the *current* models and clears every piece of interaction
+    // state. Not optional before a model swap: a gesture is begun in mouseDown on one model and
+    // ended in mouseUp on whatever modelFor() returns by then, so swapping mid-drag would leave
+    // the old model inside a transaction forever and hit the new one with an unmatched
+    // endGesture. The stale indices are their own hazard - draggedNodeIndex may name a node that
+    // does not exist on the layer being switched to.
+    //
+    // The in-progress edit is kept rather than rolled back, so a cancelled drag lands as one
+    // ordinary undo step, consistent with the one-gesture-one-undo rule.
+    void cancelActiveGesture();
 
     // Points sampled per Bezier segment when drawing a curve — fine enough
     // that individual line segments aren't visible at typical canvas sizes.

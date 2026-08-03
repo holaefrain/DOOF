@@ -9,7 +9,8 @@
 // Owns all visible panels and controls. Created and destroyed by the host
 // independently of the processor; the processor must never store a pointer
 // to this editor (it may be null at any time).
-class DOOFAudioProcessorEditor : public juce::AudioProcessorEditor
+class DOOFAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                  private juce::Timer
 {
 public:
     // Constructs the editor and sets the initial window size.
@@ -29,6 +30,10 @@ public:
     // undo history (§Step 1's shared UndoManager).
     bool keyPressed(const juce::KeyPress&) override;
 
+    // Component ID on the placeholder below, so a test can find it without this class exposing
+    // its children. Same approach as LayerStrip's control IDs.
+    static const char* const placeholderID;
+
 private:
     // Shared by keyPressed and the undo/redo buttons. Either model's
     // undo()/redo() reaches the same shared UndoManager (§Step 1), so which
@@ -40,6 +45,22 @@ private:
     // after the canvas's Length handle is dragged, and whenever a field's
     // own edit is committed (to reflect any clamping the model applied).
     void refreshLengthLabels();
+
+    // Shows or hides the canvas and its toolbar according to the selected layer's type (§4.6:
+    // the contextual panel swaps with the layer type). Only touches the components when the
+    // answer has actually changed, so it is cheap to call from the poll below.
+    void refreshContextualPanel();
+
+    // Polls the selected layer's type. A poll rather than a callback because the type can change
+    // without any click here - host automation and preset loads both move it - and the strip's
+    // combo box is not the only route to it. Same ~30 fps as LayerStrip, per §0.5.
+    void timerCallback() override;
+    static constexpr int kPollHz = 30;
+
+    // What refreshContextualPanel last acted on, so a poll that changes nothing does nothing.
+    // -1 means "nothing shown yet", which no real layer or type can equal.
+    int lastShownLayer = -1;
+    int lastShownType  = -1;
 
     // Marks one layer as selected and clears the other four, so exactly one is ever selected.
     // The selection currently only changes which strip is outlined; retargeting the canvas and
@@ -57,6 +78,14 @@ private:
     // Which layer the strip currently has selected. Layer 1 to start, matching the default patch
     // where it is the only audible layer.
     int selectedLayer = 0;
+
+    // Every layer's type parameter, resolved once so the poll does no string lookups.
+    std::array<std::atomic<float>*, LayerAudibility::kNumLayers> layerTypeParams { };
+
+    // Stands in for the canvas when the selected layer has nothing to edit yet - a Click layer
+    // (Phase 5) or one switched Off. Occupies the canvas's bounds so the swap reads as the panel
+    // changing rather than as the window emptying.
+    juce::Label contextualPlaceholder;
 
     // The central canvas (§3.4): pitch + amp curves overlaid on one time axis.
     // Declared after audioProcessor since its constructor reads model

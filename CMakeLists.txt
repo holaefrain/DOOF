@@ -147,6 +147,11 @@ target_compile_definitions(DOOFIntegrationTests
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JucePlugin_Name="DOOF"
+        # Test-only: lets a test pump the message loop for a bounded time, so the GUI's ~30 fps
+        # polls (the layer strips' solo/dim, the editor's contextual panel) can actually be
+        # observed firing rather than only reasoned about. Never set on the DOOF target itself -
+        # modal loops inside a plugin are a hosting hazard.
+        JUCE_MODAL_LOOPS_PERMITTED=1
 )
 
 target_link_libraries(DOOFIntegrationTests

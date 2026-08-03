@@ -7,6 +7,8 @@
 // [0,1]. The initial view duration matches whichever model's Length (§Step 5)
 // is currently longer, so the whole work area is visible on load without
 // needing to zoom/pan first; the user can zoom/pan from there (Step 4).
+const char* const DOOFAudioProcessorEditor::placeholderID = "contextualPlaceholder";
+
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
       envelopeCanvas(p.getLayer(0).pitchModel, juce::Range<double>(20.0, 220.0),
@@ -128,6 +130,17 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
 
     layerStrips[(size_t) selectedLayer]->setSelected(true);
 
+    for (int i = 0; i < DOOFAudioProcessor::getNumLayers(); ++i)
+    {
+        layerTypeParams[(size_t) i] = audioProcessor.apvts.getRawParameterValue(ParamIDs::layerType(i));
+        jassert(layerTypeParams[(size_t) i] != nullptr);
+    }
+
+    contextualPlaceholder.setComponentID(placeholderID);
+    contextualPlaceholder.setJustificationType(juce::Justification::centred);
+    contextualPlaceholder.setColour(juce::Label::textColourId, juce::Colours::grey);
+    addChildComponent(contextualPlaceholder); // added but not shown; the panel decides
+
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
@@ -142,6 +155,10 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     addAndMakeVisible(savePresetButton);
     addAndMakeVisible(loadPresetButton);
     setSize(800, 600);
+
+    // After setSize, so the placeholder already has the canvas's bounds if it is the one shown.
+    refreshContextualPanel();
+    startTimerHz(kPollHz);
 
     // Undo/redo shortcuts need somewhere to land initially; a click on
     // envelopeCanvas later re-targets focus there, but unhandled key presses
@@ -197,7 +214,48 @@ void DOOFAudioProcessorEditor::resized()
         layerStrips[i]->setBounds(isLast ? layerBar : layerBar.removeFromLeft(cellWidth));
     }
 
+    // Both occupy the same space; refreshContextualPanel decides which one is visible.
     envelopeCanvas.setBounds(bounds);
+    contextualPlaceholder.setBounds(bounds);
+}
+
+void DOOFAudioProcessorEditor::refreshContextualPanel()
+{
+    const int type = (int) layerTypeParams[(size_t) selectedLayer]->load();
+
+    if (selectedLayer == lastShownLayer && type == lastShownType)
+        return;
+
+    lastShownLayer = selectedLayer;
+    lastShownType  = type;
+
+    // Only Sub has anything to edit today. Click gets its own panel in Phase 5; Off has nothing
+    // to show by definition.
+    const bool isSub = (type == (int) ParamIDs::LayerType::sub);
+
+    envelopeCanvas.setVisible(isSub);
+
+    // The canvas toolbar goes with it - these controls all act on the curves, so leaving them
+    // live over an empty panel would let you edit a layer that isn't on screen. Undo/redo and
+    // preset save/load stay put: they are global, not per-layer.
+    pitchLogToggle.setVisible(isSub);
+    editingCurveBox.setVisible(isSub);
+    pitchLengthCaption.setVisible(isSub);
+    pitchLengthValue.setVisible(isSub);
+    ampLengthCaption.setVisible(isSub);
+    ampLengthValue.setVisible(isSub);
+
+    contextualPlaceholder.setVisible(! isSub);
+    if (! isSub)
+        contextualPlaceholder.setText(type == (int) ParamIDs::LayerType::click
+                                        ? "Click layer - arriving in Phase 5"
+                                        : "Layer off",
+                                       juce::dontSendNotification);
+}
+
+void DOOFAudioProcessorEditor::timerCallback()
+{
+    refreshContextualPanel();
 }
 
 void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)
@@ -210,6 +268,15 @@ void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)
     // value is unchanged, so this cannot leave two outlined if selection ever moves another way.
     for (int i = 0; i < DOOFAudioProcessor::getNumLayers(); ++i)
         layerStrips[(size_t) i]->setSelected(i == layerIndex);
+
+    // The canvas now edits the selected layer's curves. The toolbar around it - the Length
+    // fields, the log toggle, the editing-curve selector - still reads layer 1 until 6c.
+    auto& layer = audioProcessor.getLayer(layerIndex);
+    envelopeCanvas.setModels(layer.pitchModel, layer.ampModel);
+
+    // Immediately, rather than waiting up to a frame for the poll to notice: a click should swap
+    // the panel on the same gesture, not visibly a moment later.
+    refreshContextualPanel();
 }
 
 bool DOOFAudioProcessorEditor::keyPressed(const juce::KeyPress& key)

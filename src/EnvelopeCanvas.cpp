@@ -600,6 +600,49 @@ void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
     }
 }
 
+void EnvelopeCanvas::cancelActiveGesture()
+{
+    // Checked independently rather than as the mutually exclusive chain mouseUp uses. Only one
+    // can really be active, but nothing here depends on that, and an unbalanced gesture is the
+    // one failure mode this function exists to make impossible.
+    if (draggedNodeIndex != -1)
+    {
+        modelFor(draggingPitch).endGesture();
+        draggedNodeIndex = -1;
+    }
+
+    if (reshapeSegmentIndex != -1)
+    {
+        modelFor(reshapingPitch).endGesture();
+        reshapeSegmentIndex = -1;
+    }
+
+    if (draggingLength)
+    {
+        modelFor(lengthDragIsPitch).endGesture();
+        draggingLength = false;
+    }
+
+    // No gesture of their own, but leaving them set would resume a pan or paint a stale readout
+    // against the layer just switched to.
+    panning = false;
+    readoutText = {};
+}
+
+void EnvelopeCanvas::setModels(EnvelopeModel& newPitchModel, EnvelopeModel& newAmpModel)
+{
+    if (pitchModel == &newPitchModel && ampModel == &newAmpModel)
+        return;
+
+    // Before the swap, so the gestures end on the models they were begun on.
+    cancelActiveGesture();
+
+    pitchModel = &newPitchModel;
+    ampModel   = &newAmpModel;
+
+    repaint();
+}
+
 void EnvelopeCanvas::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
     if (wheel.deltaY == 0.0f)

@@ -2,6 +2,8 @@
 #include "ParamIDs.h"
 #include "LayerAudibility.h"
 #include "LayerStrip.h"
+#include "EnvelopeCanvas.h"
+#include "PluginEditor.h"
 
 #include <cmath>
 #include <limits>
@@ -1202,6 +1204,295 @@ private:
 };
 
 static Phase4LayerStripTest phase4LayerStripTest;
+
+// Phase4CanvasRetargetTest — selecting a layer points the canvas at that layer's curves, and
+// doing so mid-drag does not leave an envelope model stuck inside an undo transaction.
+//
+// That second half is the reason setModels cancels first. A gesture is begun in mouseDown on one
+// model and ended in mouseUp on whatever the canvas is pointing at by then, so a naive swap
+// orphans the open transaction on the outgoing model - after which every later edit on that layer
+// silently coalesces into it, and one undo throws away an unbounded amount of work.
+class Phase4CanvasRetargetTest : public juce::UnitTest
+{
+public:
+    Phase4CanvasRetargetTest() : juce::UnitTest("Phase4CanvasRetarget") {}
+
+    void runTest() override
+    {
+        testSelectingALayerRetargetsTheCanvas();
+        testSwappingMidDragLeavesNoOpenTransaction();
+    }
+
+private:
+    // The canvas maps pitch onto the range [20, 220] over a 472 px height, so the seeded first
+    // node at (t=0, 150 Hz) lands here. Computed rather than hunted for, so a mapping change
+    // shows up as this test missing the node instead of quietly hitting something else.
+    static juce::Point<float> pitchNodeZeroPixel() { return { 0.0f, 165.2f }; }
+
+    static juce::MouseEvent mouseEventAt(juce::Component* c, juce::Point<float> position,
+                                          int clicks = 1, bool wasDragged = false)
+    {
+        return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), position,
+                                 juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                 c, c, juce::Time::getCurrentTime(), position,
+                                 juce::Time::getCurrentTime(), clicks, wasDragged);
+    }
+
+    template <typename ChildType>
+    static juce::Array<ChildType*> childrenOfType(juce::Component& parent)
+    {
+        juce::Array<ChildType*> found;
+        for (auto* child : parent.getChildren())
+            if (auto* typed = dynamic_cast<ChildType*>(child))
+                found.add(typed);
+        return found;
+    }
+
+    void testSelectingALayerRetargetsTheCanvas()
+    {
+        beginTest("(a) Selecting a layer points the canvas at that layer's curves");
+
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
+        editor->setBounds(0, 0, 800, 600);
+
+        auto canvases = childrenOfType<EnvelopeCanvas>(*editor);
+        auto strips   = childrenOfType<LayerStrip>(*editor);
+
+        expect(canvases.size() == 1 && strips.size() == processor.getNumLayers(),
+               "Editor does not hold one canvas and one strip per layer");
+        if (canvases.size() != 1 || strips.size() != processor.getNumLayers())
+            return;
+
+        const int before1 = processor.getLayer(0).pitchModel.getNumNodes();
+        const int before3 = processor.getLayer(2).pitchModel.getNumNodes();
+
+        // Select layer 3 the way a user would, then add a node on the canvas.
+        strips[2]->mouseDown(mouseEventAt(strips[2], {}));
+        canvases[0]->mouseDoubleClick(mouseEventAt(canvases[0], { 300.0f, 200.0f }, 2));
+
+        expectEquals(processor.getLayer(2).pitchModel.getNumNodes(), before3 + 1,
+                     "Editing the canvas after selecting layer 3 did not reach layer 3");
+        expectEquals(processor.getLayer(0).pitchModel.getNumNodes(), before1,
+                     "Editing the canvas after selecting layer 3 still reached layer 1");
+    }
+
+    void testSwappingMidDragLeavesNoOpenTransaction()
+    {
+        beginTest("(b) Switching layers mid-drag leaves the outgoing model's undo history intact");
+
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
+        editor->setBounds(0, 0, 800, 600);
+
+        auto canvases = childrenOfType<EnvelopeCanvas>(*editor);
+        auto strips   = childrenOfType<LayerStrip>(*editor);
+        if (canvases.size() != 1 || strips.size() != processor.getNumLayers())
+            return;
+
+        auto& pitch = processor.getLayer(0).pitchModel;
+        const double originalValue = pitch.getNode(0).value;
+
+        // Begin a node drag on layer 1 and leave it open.
+        canvases[0]->mouseDown(mouseEventAt(canvases[0], pitchNodeZeroPixel()));
+        canvases[0]->mouseDrag(mouseEventAt(canvases[0], { 40.0f, 220.0f }, 1, true));
+
+        // Without this the rest of the test is vacuous: if the press missed the node handle no
+        // gesture was ever opened, and there would be nothing for the swap to mishandle.
+        expect(std::abs(pitch.getNode(0).value - originalValue) > 1.0e-9,
+               "The drag never moved a node, so no gesture was open and this test proves nothing");
+
+        // Switch layers with the drag still in progress.
+        strips[2]->mouseDown(mouseEventAt(strips[2], {}));
+
+        // Two further edits on the layer just left. If its transaction were still open they would
+        // both fall inside it, and one undo would discard both plus the drag.
+        const int afterSwap = pitch.getNumNodes();
+        pitch.addNode(0.11, 100.0);
+        pitch.addNode(0.12, 101.0);
+        expectEquals(pitch.getNumNodes(), afterSwap + 2, "The two edits did not both land");
+
+        pitch.undo();
+        expectEquals(pitch.getNumNodes(), afterSwap + 1,
+                     "One undo removed more than the last edit, so the drag's transaction was "
+                     "left open when the canvas switched layers");
+    }
+};
+
+static Phase4CanvasRetargetTest phase4CanvasRetargetTest;
+
+// Phase4ContextualPanelTest — §4.6: the contextual panel swaps with the selected layer's type.
+// Sub shows the canvas and its toolbar; Click and Off replace both with a placeholder.
+//
+// Subtest (c) is the one worth having. The type can move with no click anywhere in this editor -
+// host automation and preset loads both do it - so the panel is driven by a poll, and a poll that
+// was never started fails in exactly the way the click path cannot reveal.
+class Phase4ContextualPanelTest : public juce::UnitTest
+{
+public:
+    Phase4ContextualPanelTest() : juce::UnitTest("Phase4ContextualPanel") {}
+
+    void runTest() override
+    {
+        testPanelFollowsTheSelectedLayersType();
+        testToolbarHidesWithTheCanvas();
+        testAutomatingTheTypeSwapsThePanelWithoutAClick();
+    }
+
+private:
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    template <typename ChildType>
+    static juce::Array<ChildType*> childrenOfType(juce::Component& parent)
+    {
+        juce::Array<ChildType*> found;
+        for (auto* child : parent.getChildren())
+            if (auto* typed = dynamic_cast<ChildType*>(child))
+                found.add(typed);
+        return found;
+    }
+
+    struct Editor
+    {
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> editor;
+        EnvelopeCanvas* canvas = nullptr;
+        juce::Label* placeholder = nullptr;
+        juce::Array<LayerStrip*> strips;
+    };
+
+    // Built after the caller has set any parameters it needs, since the editor reads the state
+    // it is constructed against.
+    static void open(Editor& e)
+    {
+        e.editor.reset(e.processor.createEditor());
+        e.editor->setBounds(0, 0, 800, 600);
+        e.canvas = childrenOfType<EnvelopeCanvas>(*e.editor).getFirst();
+        e.strips = childrenOfType<LayerStrip>(*e.editor);
+        e.placeholder = dynamic_cast<juce::Label*>(
+            e.editor->findChildWithID(DOOFAudioProcessorEditor::placeholderID));
+    }
+
+    static void clickStrip(Editor& e, int index)
+    {
+        auto* strip = e.strips[index];
+        strip->mouseDown(juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), {},
+                                           juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                           strip, strip, juce::Time::getCurrentTime(), {},
+                                           juce::Time::getCurrentTime(), 1, false));
+    }
+
+    void testPanelFollowsTheSelectedLayersType()
+    {
+        beginTest("(a) Sub shows the canvas; Click and Off replace it with a placeholder");
+
+        Editor e;
+        setParamValue(e.processor, "layer2.type", (float) (int) ParamIDs::LayerType::click);
+        open(e);
+
+        expect(e.canvas != nullptr && e.placeholder != nullptr && e.strips.size() == 5,
+               "Editor is missing the canvas, the placeholder or the strips");
+        if (e.canvas == nullptr || e.placeholder == nullptr || e.strips.size() != 5)
+            return;
+
+        // Layer 1 is Sub out of the box, and is selected on open.
+        expect(e.canvas->isVisible(), "The canvas is hidden for a Sub layer");
+        expect(! e.placeholder->isVisible(), "The placeholder is showing over a Sub layer");
+
+        clickStrip(e, 1);
+        expect(! e.canvas->isVisible(), "The canvas is still showing for a Click layer");
+        expect(e.placeholder->isVisible(), "No placeholder for a Click layer");
+        expect(e.placeholder->getText().containsIgnoreCase("click"),
+               "The Click placeholder does not mention the layer type, it says: "
+                 + e.placeholder->getText());
+
+        clickStrip(e, 2);
+        expect(! e.canvas->isVisible(), "The canvas is still showing for an Off layer");
+        expect(e.placeholder->getText().containsIgnoreCase("off"),
+               "The Off placeholder does not say the layer is off, it says: "
+                 + e.placeholder->getText());
+
+        clickStrip(e, 0);
+        expect(e.canvas->isVisible(), "The canvas did not come back on returning to a Sub layer");
+        expect(! e.placeholder->isVisible(), "The placeholder outlived the return to a Sub layer");
+    }
+
+    void testToolbarHidesWithTheCanvas()
+    {
+        beginTest("(b) The canvas toolbar hides with the canvas, but the global controls stay");
+
+        Editor e;
+        open(e);
+        if (e.canvas == nullptr)
+            return;
+
+        // Every button and combo in the editor, by their visible text, before and after.
+        auto visibleTexts = [&e]
+        {
+            juce::StringArray names;
+            for (auto* child : e.editor->getChildren())
+                if (child->isVisible())
+                    if (auto* button = dynamic_cast<juce::Button*>(child))
+                        names.add(button->getButtonText());
+            return names;
+        };
+
+        const auto whenSub = visibleTexts();
+        expect(whenSub.contains("Log Scale (Pitch)"), "The log toggle is missing for a Sub layer");
+        expect(whenSub.contains("Undo") && whenSub.contains("Save..."),
+               "The global controls are missing for a Sub layer");
+
+        clickStrip(e, 2); // an Off layer
+        const auto whenOff = visibleTexts();
+
+        expect(! whenOff.contains("Log Scale (Pitch)"),
+               "The log toggle still edits a curve that is no longer on screen");
+
+        // These are not per-layer, so hiding them would be wrong: undo spans every layer's edits
+        // and the preset buttons act on the whole patch.
+        expect(whenOff.contains("Undo") && whenOff.contains("Redo"),
+               "Undo/redo were hidden with the canvas, but they are global");
+        expect(whenOff.contains("Save...") && whenOff.contains("Load..."),
+               "The preset buttons were hidden with the canvas, but they are global");
+    }
+
+    void testAutomatingTheTypeSwapsThePanelWithoutAClick()
+    {
+        beginTest("(c) Automating the selected layer's type swaps the panel with no click");
+
+        Editor e;
+        open(e);
+        if (e.canvas == nullptr || e.placeholder == nullptr)
+            return;
+
+        expect(e.canvas->isVisible(), "The canvas should start visible on the default Sub layer");
+
+        // Exactly what a host automating the parameter does: nothing touches the editor.
+        setParamValue(e.processor, "layer1.type", (float) (int) ParamIDs::LayerType::off);
+
+        expect(e.canvas->isVisible(),
+               "The panel changed before the poll could have run, so this test is not measuring "
+               "the poll at all");
+
+        // Long enough for a 30 Hz timer to have fired several times.
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+
+        expect(! e.canvas->isVisible(),
+               "The canvas is still showing after the layer was automated to Off, so the poll "
+               "never ran");
+        expect(e.placeholder->isVisible() && e.placeholder->getText().containsIgnoreCase("off"),
+               "The placeholder did not appear after the layer was automated to Off");
+    }
+};
+
+static Phase4ContextualPanelTest phase4ContextualPanelTest;
+
+
 
 
 
