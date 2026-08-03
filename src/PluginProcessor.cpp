@@ -7,28 +7,36 @@
 // State-serialisation schema for getStateInformation/setStateInformation and the .doof file:
 //
 //   DOOFState { version }
-//     DOOF_State                        <- apvts.copyState(), all 21 parameters
-//     LAYER { index }                   <- one per layer, five of them
+//     DOOF_State                                  <- apvts.copyState(), all 21 parameters
+//     LAYER { index, logScale, editingPitch }     <- one per layer, five of them
 //       ENVELOPE { curve="pitch", ... }
 //       ENVELOPE { curve="amp",   ... }
 //
 // Both envelopes are EnvelopeIDs::envelopeType ("ENVELOPE"), so curveProp distinguishes them.
 // Never rename any of these once a preset has shipped - same rule as APVTS parameter IDs (§2).
 //
-// Phase 3 wrote no version and put the two ENVELOPE trees straight on the root, describing one
-// layer. Absence of versionProp is what identifies that layout; see setStateInformation.
+// Versions, oldest first:
+//   absent - Phase 3: no version, both ENVELOPE trees straight on the root, describing one layer.
+//   2      - Phase 4: LAYER children, five of them. No view preferences.
+//   3      - Phase 4: adds logScale/editingPitch to each LAYER.
+//
+// Only the flat layout needs detecting explicitly, which absence of versionProp does. Reading a
+// version 2 file needs no branch of its own: the view preferences are read with defaults, and the
+// defaults are precisely the behaviour a file written before they existed had.
 namespace PresetIDs
 {
-    static const juce::Identifier rootType      { "DOOFState" };
-    static const juce::Identifier layerNodeType { "LAYER" };
-    static const juce::Identifier curveProp     { "curve" };
-    static const juce::Identifier indexProp     { "index" };
-    static const juce::Identifier versionProp   { "version" };
+    static const juce::Identifier rootType          { "DOOFState" };
+    static const juce::Identifier layerNodeType     { "LAYER" };
+    static const juce::Identifier curveProp         { "curve" };
+    static const juce::Identifier indexProp         { "index" };
+    static const juce::Identifier versionProp       { "version" };
+    static const juce::Identifier logScaleProp      { "logScale" };
+    static const juce::Identifier editingPitchProp  { "editingPitch" };
     static const juce::String pitchCurveTag = "pitch";
     static const juce::String ampCurveTag   = "amp";
 
-    // Bumped whenever the layout below changes shape; Phase 5 and Phase 7 will both need it again.
-    static constexpr int layeredVersion = 2;
+    // Bumped whenever the layout above changes shape; Phase 5 and Phase 7 will both need it again.
+    static constexpr int currentVersion = 3;
 }
 
 // Construct the processor, declare the bus layout, and initialise the APVTS.
@@ -130,6 +138,20 @@ const Layer& DOOFAudioProcessor::getLayer(int index) const
 {
     jassert(juce::isPositiveAndBelow(index, getNumLayers()));
     return *layers[(size_t) index];
+}
+
+// Beside getLayer, since the two are looked up together: the editor asks for a layer's models
+// and how that layer was last being viewed at the same moment.
+LayerViewPrefs& DOOFAudioProcessor::getLayerViewPrefs(int index)
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+    return layerViewPrefs[(size_t) index];
+}
+
+const LayerViewPrefs& DOOFAudioProcessor::getLayerViewPrefs(int index) const
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+    return layerViewPrefs[(size_t) index];
 }
 
 // Build the initial parameter layout for the APVTS.
@@ -347,7 +369,7 @@ void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 
     // Written explicitly so a reader never has to infer the layout from which children happen to
     // be present, which is what the Phase 3 fallback would otherwise have to guess at.
-    root.setProperty(PresetIDs::versionProp, PresetIDs::layeredVersion, nullptr);
+    root.setProperty(PresetIDs::versionProp, PresetIDs::currentVersion, nullptr);
 
     root.addChild(apvts.copyState(), -1, nullptr);
 
@@ -357,6 +379,10 @@ void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     {
         juce::ValueTree layerNode { PresetIDs::layerNodeType };
         layerNode.setProperty(PresetIDs::indexProp, i, nullptr);
+
+        const auto& prefs = layerViewPrefs[(size_t) i];
+        layerNode.setProperty(PresetIDs::logScaleProp,     prefs.pitchLogScale, nullptr);
+        layerNode.setProperty(PresetIDs::editingPitchProp, prefs.editingPitch,  nullptr);
 
         auto pitchCopy = getLayer(i).pitchModel.getValueTree().createCopy();
         pitchCopy.setProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag, nullptr);
@@ -406,8 +432,17 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
                 continue;
 
             const int index = layerNode.getProperty(PresetIDs::indexProp, -1);
-            if (juce::isPositiveAndBelow(index, getNumLayers()))
-                loadEnvelopesInto(index, layerNode);
+            if (! juce::isPositiveAndBelow(index, getNumLayers()))
+                continue;
+
+            loadEnvelopesInto(index, layerNode);
+
+            // Defaulted rather than branched on the version: a version 2 file carries neither
+            // property, and the defaults are exactly what it meant.
+            const LayerViewPrefs fallback;
+            auto& prefs = layerViewPrefs[(size_t) index];
+            prefs.pitchLogScale = layerNode.getProperty(PresetIDs::logScaleProp,     fallback.pitchLogScale);
+            prefs.editingPitch  = layerNode.getProperty(PresetIDs::editingPitchProp, fallback.editingPitch);
         }
     }
     else
@@ -418,6 +453,10 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
         // parameters above rather than keeping the outgoing patch's curves.
         for (int i = 1; i < getNumLayers(); ++i)
             seedLayerWithDefaults(i);
+
+        // Nor about how any layer was being viewed, so every layer's view goes back to factory
+        // too - including layer 1, whose envelopes the file did describe.
+        layerViewPrefs.fill(LayerViewPrefs{});
     }
 
     // A loaded preset is not a user edit to undo back from, and the re-seeding above would

@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Layer.h"
 #include "LayerAudibility.h"
+#include "LayerViewPrefs.h"
 #include <array>
 #include <memory>
 
@@ -72,6 +73,12 @@ public:
     // Number of layers, so callers (the layer strip, tests) don't hardcode it.
     static constexpr int getNumLayers() { return LayerAudibility::kNumLayers; }
 
+    // One layer's canvas view settings. Lives here rather than in the editor because the host may
+    // close and reopen the editor at any point, and these are saved with the preset. Returned by
+    // reference so the editor can write straight through as the user changes them.
+    LayerViewPrefs&       getLayerViewPrefs(int index);
+    const LayerViewPrefs& getLayerViewPrefs(int index) const;
+
 private:
     // Builds the parameter layout passed to the APVTS constructor.
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.
@@ -105,6 +112,11 @@ private:
     // models beside it), so a plain std::array<Layer, N> can't be formed;
     // these are allocated once in the constructor, never on the audio thread.
     std::array<std::unique_ptr<Layer>, LayerAudibility::kNumLayers> layers;
+
+    // Per-layer canvas view settings, saved and restored alongside each layer's envelopes. Plain
+    // values rather than parameters: they change nothing audible, so exposing them for host
+    // automation would only clutter the parameter list.
+    std::array<LayerViewPrefs, LayerAudibility::kNumLayers> layerViewPrefs;
 
     // Cached APVTS raw-value pointers, resolved once in the constructor.
     //

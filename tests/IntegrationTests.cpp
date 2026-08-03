@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "ParamIDs.h"
 #include "LayerAudibility.h"
+#include "LayerViewPrefs.h"
 #include "LayerStrip.h"
 #include "EnvelopeCanvas.h"
 #include "PluginEditor.h"
@@ -682,6 +683,8 @@ public:
     void runTest() override
     {
         testAllFiveLayersSurviveARoundTrip();
+        testViewPrefsSurviveARoundTrip();
+        testVersion2PresetLoadsWithDefaultViewPrefs();
         testPhase3PresetStillLoads();
     }
 
@@ -863,9 +866,121 @@ private:
         return node;
     }
 
+    // Same hand-built approach as the Phase 3 blob below, one schema version on: LAYER children,
+    // but none of the view-preference properties version 3 adds.
+    static juce::MemoryBlock buildVersion2Preset()
+    {
+        juce::ValueTree root { juce::Identifier("DOOFState") };
+        root.setProperty("version", 2, nullptr);
+
+        juce::ValueTree apvtsState { juce::Identifier("DOOF_State") };
+        juce::ValueTree gain { juce::Identifier("PARAM") };
+        gain.setProperty("id", "sub.gain", nullptr);
+        gain.setProperty("value", 0.65, nullptr);
+        apvtsState.addChild(gain, -1, nullptr);
+        root.addChild(apvtsState, -1, nullptr);
+
+        for (int i = 0; i < LayerAudibility::kNumLayers; ++i)
+        {
+            juce::ValueTree layerNode { juce::Identifier("LAYER") };
+            layerNode.setProperty("index", i, nullptr);
+
+            juce::ValueTree pitch { juce::Identifier("ENVELOPE") };
+            pitch.setProperty("curve", "pitch", nullptr);
+            pitch.addChild(makeNode(0.0, 120.0 + 5.0 * i), -1, nullptr);
+            pitch.addChild(makeNode(0.3,  40.0), -1, nullptr);
+            layerNode.addChild(pitch, -1, nullptr);
+
+            juce::ValueTree amp { juce::Identifier("ENVELOPE") };
+            amp.setProperty("curve", "amp", nullptr);
+            amp.addChild(makeNode(0.0, 0.0), -1, nullptr);
+            amp.addChild(makeNode(0.5, 1.0), -1, nullptr);
+            layerNode.addChild(amp, -1, nullptr);
+
+            root.addChild(layerNode, -1, nullptr);
+        }
+
+        juce::MemoryBlock block;
+        juce::AudioProcessor::copyXmlToBinary(*root.createXml(), block);
+        return block;
+    }
+
+    void testViewPrefsSurviveARoundTrip()
+    {
+        beginTest("(c) Each layer's log scale and editing curve survive save and reload");
+
+        DOOFAudioProcessor processor;
+
+        // A different combination per layer, so a swap between layers cannot pass unnoticed and
+        // neither can a single field being written for all five.
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            processor.getLayerViewPrefs(i).pitchLogScale = (i % 2 == 0);
+            processor.getLayerViewPrefs(i).editingPitch  = (i < 2);
+        }
+
+        juce::MemoryBlock saved;
+        processor.getStateInformation(saved);
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            processor.getLayerViewPrefs(i).pitchLogScale = false;
+            processor.getLayerViewPrefs(i).editingPitch  = false;
+        }
+
+        processor.setStateInformation(saved.getData(), (int) saved.getSize());
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto where = " on layer " + juce::String(i + 1);
+            expect(processor.getLayerViewPrefs(i).pitchLogScale == (i % 2 == 0),
+                   "Log scale did not survive the round trip" + where);
+            expect(processor.getLayerViewPrefs(i).editingPitch == (i < 2),
+                   "Editing curve did not survive the round trip" + where);
+        }
+    }
+
+    void testVersion2PresetLoadsWithDefaultViewPrefs()
+    {
+        beginTest("(d) A version 2 preset loads, taking the default view for every layer");
+
+        DOOFAudioProcessor processor;
+
+        // Dirtied first, so "took the default" is distinguishable from "was never touched".
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            processor.getLayerViewPrefs(i).pitchLogScale = true;
+            processor.getLayerViewPrefs(i).editingPitch  = false;
+        }
+
+        const auto preset = buildVersion2Preset();
+        processor.setStateInformation(preset.getData(), (int) preset.getSize());
+
+        const LayerViewPrefs expected;
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto where = " on layer " + juce::String(i + 1);
+
+            // The envelopes must still arrive, or this would pass on a preset that failed to load
+            // at all rather than on one that loaded without view preferences.
+            expectWithinAbsoluteError(processor.getLayer(i).pitchModel.getNode(0).value,
+                                       120.0 + 5.0 * i, 1.0e-9,
+                                       "A version 2 preset's envelopes did not load" + where);
+
+            expect(processor.getLayerViewPrefs(i).pitchLogScale == expected.pitchLogScale,
+                   "A version 2 preset should leave log scale at its default" + where);
+            expect(processor.getLayerViewPrefs(i).editingPitch == expected.editingPitch,
+                   "A version 2 preset should leave the editing curve at its default" + where);
+        }
+
+        expectWithinAbsoluteError(rawParam(processor, "sub.gain"), 0.65f, 1.0e-6f,
+                                   "A version 2 preset's master gain did not load");
+    }
+
     void testPhase3PresetStillLoads()
     {
-        beginTest("(b) A preset written before the mixer loads as the single-layer patch it described");
+        beginTest("(e) A preset written before the mixer loads as the single-layer patch it described");
 
         DOOFAudioProcessor processor;
 
@@ -877,6 +992,8 @@ private:
             setParamValue(processor, layerId(i, "solo"), 1.0f);
             processor.getLayer(i).pitchModel.moveNode(0, 0.0, 999.0);
             processor.getLayer(i).ampModel.setLength(1.234);
+            processor.getLayerViewPrefs(i).pitchLogScale = true;
+            processor.getLayerViewPrefs(i).editingPitch  = false;
         }
 
         const auto preset = buildPhase3Preset();
@@ -919,6 +1036,20 @@ private:
             expectWithinAbsoluteError(processor.getLayer(i).ampModel.getLength(),
                                        EnvelopeModel::kDefaultLength, 1.0e-9,
                                        "Reseeding must clear the stale Length" + where);
+        }
+
+        // The view preferences go back to factory for the same reason the mixer parameters do:
+        // the preset predates them entirely, so keeping the outgoing patch's would make the same
+        // file load differently depending on what was open before it. Nothing resets these for
+        // us - unlike the APVTS parameters, which JUCE defaults on replaceState.
+        const LayerViewPrefs expectedPrefs;
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto where = " on layer " + juce::String(i + 1);
+            expect(processor.getLayerViewPrefs(i).pitchLogScale == expectedPrefs.pitchLogScale,
+                   "A pre-mixer preset must reset log scale" + where);
+            expect(processor.getLayerViewPrefs(i).editingPitch == expectedPrefs.editingPitch,
+                   "A pre-mixer preset must reset the editing curve" + where);
         }
 
         // A freshly loaded preset is not a user edit, so there must be nothing to undo back from.
