@@ -4,17 +4,31 @@
 #include "ParamIDs.h"
 #include "LayerAudibility.h"
 
-// State-serialisation schema (Phase 3 Step 7): wraps apvts state and both
-// envelope models' trees into one root for getStateInformation/setStateInformation
-// and the .doof preset file. pitchEnvelopeModel and ampEnvelopeModel are both
-// EnvelopeIDs::envelopeType ("ENVELOPE"), so curveProp distinguishes them —
-// same rule as APVTS parameter IDs: never rename once a preset has shipped.
+// State-serialisation schema for getStateInformation/setStateInformation and the .doof file:
+//
+//   DOOFState { version }
+//     DOOF_State                        <- apvts.copyState(), all 21 parameters
+//     LAYER { index }                   <- one per layer, five of them
+//       ENVELOPE { curve="pitch", ... }
+//       ENVELOPE { curve="amp",   ... }
+//
+// Both envelopes are EnvelopeIDs::envelopeType ("ENVELOPE"), so curveProp distinguishes them.
+// Never rename any of these once a preset has shipped - same rule as APVTS parameter IDs (§2).
+//
+// Phase 3 wrote no version and put the two ENVELOPE trees straight on the root, describing one
+// layer. Absence of versionProp is what identifies that layout; see setStateInformation.
 namespace PresetIDs
 {
-    static const juce::Identifier rootType  { "DOOFState" };
-    static const juce::Identifier curveProp { "curve" };
+    static const juce::Identifier rootType      { "DOOFState" };
+    static const juce::Identifier layerNodeType { "LAYER" };
+    static const juce::Identifier curveProp     { "curve" };
+    static const juce::Identifier indexProp     { "index" };
+    static const juce::Identifier versionProp   { "version" };
     static const juce::String pitchCurveTag = "pitch";
     static const juce::String ampCurveTag   = "amp";
+
+    // Bumped whenever the layout below changes shape; Phase 5 and Phase 7 will both need it again.
+    static constexpr int layeredVersion = 2;
 }
 
 // Construct the processor, declare the bus layout, and initialise the APVTS.
@@ -30,11 +44,11 @@ DOOFAudioProcessor::DOOFAudioProcessor()
     // shapes — including the four that default to Off, so switching one to Sub
     // makes a sound immediately instead of silence from an empty envelope.
     for (int i = 0; i < getNumLayers(); ++i)
-    {
         layers[(size_t) i] = std::make_unique<Layer>(envelopeUndoManager);
-        DefaultEnvelopes::seedPitch(layers[(size_t) i]->pitchModel);
-        DefaultEnvelopes::seedAmp(layers[(size_t) i]->ampModel);
-    }
+
+    // Same helper the legacy preset path uses, so the factory patch can't drift between the two.
+    for (int i = 0; i < getNumLayers(); ++i)
+        seedLayerWithDefaults(i);
 
     // Seeding above went through the normal undoable edit path, so it left one
     // transaction per added node in the history — roughly 70 across ten models,
@@ -330,17 +344,30 @@ juce::AudioProcessorEditor* DOOFAudioProcessor::createEditor()
 void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     juce::ValueTree root { PresetIDs::rootType };
+
+    // Written explicitly so a reader never has to infer the layout from which children happen to
+    // be present, which is what the Phase 3 fallback would otherwise have to guess at.
+    root.setProperty(PresetIDs::versionProp, PresetIDs::layeredVersion, nullptr);
+
     root.addChild(apvts.copyState(), -1, nullptr);
 
-    // Still writes layer 0's envelopes only, in Phase 3's flat layout — Step 4
-    // re-nests this under per-layer children and covers all five.
-    auto pitchCopy = getLayer(0).pitchModel.getValueTree().createCopy();
-    pitchCopy.setProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag, nullptr);
-    root.addChild(pitchCopy, -1, nullptr);
+    // index is stored rather than relied on positionally, so a future layer count change can't
+    // silently shift every layer's envelopes onto the wrong layer.
+    for (int i = 0; i < getNumLayers(); ++i)
+    {
+        juce::ValueTree layerNode { PresetIDs::layerNodeType };
+        layerNode.setProperty(PresetIDs::indexProp, i, nullptr);
 
-    auto ampCopy = getLayer(0).ampModel.getValueTree().createCopy();
-    ampCopy.setProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag, nullptr);
-    root.addChild(ampCopy, -1, nullptr);
+        auto pitchCopy = getLayer(i).pitchModel.getValueTree().createCopy();
+        pitchCopy.setProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag, nullptr);
+        layerNode.addChild(pitchCopy, -1, nullptr);
+
+        auto ampCopy = getLayer(i).ampModel.getValueTree().createCopy();
+        ampCopy.setProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag, nullptr);
+        layerNode.addChild(ampCopy, -1, nullptr);
+
+        root.addChild(layerNode, -1, nullptr);
+    }
 
     std::unique_ptr<juce::XmlElement> xml(root.createXml());
     copyXmlToBinary(*xml, destData);
@@ -360,17 +387,83 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
     if (! root.hasType(PresetIDs::rootType))
         return;
 
+    // No version means Phase 3's flat layout: two ENVELOPE trees on the root, describing layer 1.
+    const bool isLayered = root.hasProperty(PresetIDs::versionProp);
+
+    // Done before replaceState, not after: JUCE keeps a parameter's *current* value when the
+    // loaded state has no entry for it, so an old preset would otherwise inherit whatever the
+    // session happened to have on layers 2-5 and load differently every time.
+    if (! isLayered)
+        resetLayerParametersToDefaults();
+
     const auto apvtsState = root.getChildWithName(apvts.state.getType());
     if (apvtsState.isValid())
         apvts.replaceState(apvtsState);
 
-    const auto pitchState = root.getChildWithProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag);
-    if (pitchState.isValid())
-        getLayer(0).pitchModel.setState(pitchState);
+    if (isLayered)
+    {
+        for (const auto layerNode : root)
+        {
+            if (! layerNode.hasType(PresetIDs::layerNodeType))
+                continue;
 
-    const auto ampState = root.getChildWithProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag);
+            const int index = layerNode.getProperty(PresetIDs::indexProp, -1);
+            if (juce::isPositiveAndBelow(index, getNumLayers()))
+                loadEnvelopesInto(index, layerNode);
+        }
+    }
+    else
+    {
+        loadEnvelopesInto(0, root);
+
+        // The preset said nothing about these, so they go back to factory alongside their
+        // parameters above rather than keeping the outgoing patch's curves.
+        for (int i = 1; i < getNumLayers(); ++i)
+            seedLayerWithDefaults(i);
+    }
+
+    // A loaded preset is not a user edit to undo back from, and the re-seeding above would
+    // otherwise leave its own transactions sitting at the top of the history.
+    envelopeUndoManager.clearUndoHistory();
+}
+
+// Reads the curve-tagged ENVELOPE children of `parent` into one layer's models. Shared by both
+// load paths, which differ only in which tree the envelopes hang off.
+void DOOFAudioProcessor::loadEnvelopesInto(int index, const juce::ValueTree& parent)
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+
+    const auto pitchState = parent.getChildWithProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag);
+    if (pitchState.isValid())
+        getLayer(index).pitchModel.setState(pitchState);
+
+    const auto ampState = parent.getChildWithProperty(PresetIDs::curveProp, PresetIDs::ampCurveTag);
     if (ampState.isValid())
-        getLayer(0).ampModel.setState(ampState);
+        getLayer(index).ampModel.setState(ampState);
+}
+
+// Puts one layer's envelopes back to the factory shapes. setState with an empty tree clears the
+// nodes and every property, so a stale Length can't survive into the reseeded envelope.
+void DOOFAudioProcessor::seedLayerWithDefaults(int index)
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+
+    auto& layer = getLayer(index);
+    layer.pitchModel.setState(juce::ValueTree(EnvelopeIDs::envelopeType));
+    layer.ampModel.setState(juce::ValueTree(EnvelopeIDs::envelopeType));
+
+    DefaultEnvelopes::seedPitch(layer.pitchModel);
+    DefaultEnvelopes::seedAmp(layer.ampModel);
+}
+
+// Returns every per-layer mixer parameter to its default, leaving the master gain alone since a
+// Phase 3 preset does carry that one. See the call site for why this is needed at all.
+void DOOFAudioProcessor::resetLayerParametersToDefaults()
+{
+    for (auto* parameter : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameter))
+            if (ranged->paramID != ParamIDs::subGain)
+                ranged->setValueNotifyingHost(ranged->getDefaultValue());
 }
 
 // Entry point called by the host to create a new plugin instance.
