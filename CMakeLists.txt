@@ -44,6 +44,7 @@ target_sources(DOOF
         src/EnvelopePublisher.cpp # atomic-pointer snapshot publish path to the audio thread
         src/DefaultEnvelopes.cpp  # out-of-the-box pitch/amp envelope shapes
         src/LayerAudibility.cpp   # §3.3 mute/solo audibility rule, shared by engine + GUI
+        src/LayerStrip.cpp        # one cell of the horizontal layer selector (§4.3)
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -134,6 +135,7 @@ target_sources(DOOFIntegrationTests
         src/EnvelopePublisher.cpp
         src/DefaultEnvelopes.cpp
         src/LayerAudibility.cpp
+        src/LayerStrip.cpp
 )
 
 target_include_directories(DOOFIntegrationTests PRIVATE src)

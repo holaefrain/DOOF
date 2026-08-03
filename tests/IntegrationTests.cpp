@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "ParamIDs.h"
 #include "LayerAudibility.h"
+#include "LayerStrip.h"
 
 #include <cmath>
 #include <limits>
@@ -925,6 +926,212 @@ private:
 };
 
 static Phase4StateTest phase4StateTest;
+
+// Phase4LayerStripTest — that each strip drives its own layer's parameters, in both directions.
+//
+// The bug worth guarding against is an off-by-one: a strip is constructed with a zero-based index
+// but the parameter IDs are one-based, so a strip wired to the neighbouring layer would look
+// entirely normal on screen and only misbehave. Every check below therefore confirms both that
+// the intended layer moved and that no other layer did.
+class Phase4LayerStripTest : public juce::UnitTest
+{
+public:
+    Phase4LayerStripTest() : juce::UnitTest("Phase4LayerStrip") {}
+
+    void runTest() override
+    {
+        testStripsShowCurrentStateOnConstruction();
+        testParameterMovesItsOwnStrip();
+        testStripMovesItsOwnParameters();
+    }
+
+private:
+    static juce::String layerId(int index, const juce::String& suffix)
+    {
+        return "layer" + juce::String(index + 1) + "." + suffix;
+    }
+
+    static float rawParam(DOOFAudioProcessor& processor, const juce::String& id)
+    {
+        auto* value = processor.apvts.getRawParameterValue(id);
+        return value != nullptr ? value->load() : std::numeric_limits<float>::quiet_NaN();
+    }
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    // Reaches a control by the component ID the strip publishes, so this test does not force
+    // LayerStrip to expose its children just to be testable.
+    template <typename ControlType>
+    static ControlType* control(LayerStrip& strip, const char* componentID)
+    {
+        return dynamic_cast<ControlType*>(strip.findChildWithID(componentID));
+    }
+
+    static std::vector<std::unique_ptr<LayerStrip>> makeStrips(DOOFAudioProcessor& processor)
+    {
+        std::vector<std::unique_ptr<LayerStrip>> strips;
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+            strips.push_back(std::make_unique<LayerStrip>(processor.apvts, i));
+        return strips;
+    }
+
+    // The editor is created after the state already exists - on plugin open, on preset load, on
+    // reopening a saved session - so a strip has to show the current values immediately rather
+    // than only once something moves. A combo box populated after its attachment was made, for
+    // instance, ends up blank until the parameter next changes, which nothing else here notices.
+    void testStripsShowCurrentStateOnConstruction()
+    {
+        beginTest("(a) A strip shows its layer's current values the moment it is built");
+
+        DOOFAudioProcessor processor;
+
+        // Set before the strips exist, and deliberately not the defaults, so this cannot pass by
+        // a control simply happening to start where the parameter did.
+        setParamValue(processor, layerId(2, "type"),  (float) (int) ParamIDs::LayerType::click);
+        setParamValue(processor, layerId(2, "level"), 0.61f);
+        setParamValue(processor, layerId(2, "mute"),  1.0f);
+
+        auto strips = makeStrips(processor);
+
+        auto* type  = control<juce::ComboBox>  (*strips[2], LayerStrip::typeBoxID);
+        auto* level = control<juce::Slider>    (*strips[2], LayerStrip::levelSliderID);
+        auto* mute  = control<juce::TextButton>(*strips[2], LayerStrip::muteButtonID);
+
+        expect(type != nullptr && level != nullptr && mute != nullptr, "A strip is missing a control");
+        if (type == nullptr || level == nullptr || mute == nullptr)
+            return;
+
+        expectEquals(type->getSelectedItemIndex(), (int) ParamIDs::LayerType::click,
+                     "Type combo did not show the existing value on construction");
+        expectWithinAbsoluteError(level->getValue(), 0.61, 1.0e-5,
+                                   "Level slider did not show the existing value on construction");
+        expect(mute->getToggleState(), "Mute button did not show the existing value on construction");
+
+        // The out-of-the-box patch must show up correctly too, since that is what a user opening
+        // the plugin for the first time actually sees.
+        auto* firstType = control<juce::ComboBox>(*strips[0], LayerStrip::typeBoxID);
+        expectEquals(firstType->getSelectedItemIndex(), (int) ParamIDs::LayerType::sub,
+                     "Layer 1's type combo does not show Sub on a fresh instance");
+
+        for (int i = 1; i < processor.getNumLayers(); ++i)
+            if (i != 2)
+                expectEquals(control<juce::ComboBox>(*strips[(size_t) i], LayerStrip::typeBoxID)
+                               ->getSelectedItemIndex(),
+                             (int) ParamIDs::LayerType::off,
+                             "Layer " + juce::String(i + 1) + "'s type combo does not show Off");
+    }
+
+    void testParameterMovesItsOwnStrip()
+    {
+        beginTest("(b) Moving a layer's parameter moves that strip's controls and no other's");
+
+        DOOFAudioProcessor processor;
+        auto strips = makeStrips(processor);
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            setParamValue(processor, layerId(i, "type"),  (float) (int) ParamIDs::LayerType::click);
+            setParamValue(processor, layerId(i, "level"), 0.33f);
+            setParamValue(processor, layerId(i, "mute"),  1.0f);
+            setParamValue(processor, layerId(i, "solo"),  1.0f);
+
+            for (int j = 0; j < processor.getNumLayers(); ++j)
+            {
+                const auto where = " (moved layer " + juce::String(i + 1)
+                                     + ", inspected strip " + juce::String(j + 1) + ")";
+
+                auto* type  = control<juce::ComboBox>  (*strips[(size_t) j], LayerStrip::typeBoxID);
+                auto* level = control<juce::Slider>    (*strips[(size_t) j], LayerStrip::levelSliderID);
+                auto* mute  = control<juce::TextButton>(*strips[(size_t) j], LayerStrip::muteButtonID);
+                auto* solo  = control<juce::TextButton>(*strips[(size_t) j], LayerStrip::soloButtonID);
+
+                expect(type != nullptr && level != nullptr && mute != nullptr && solo != nullptr,
+                       "A strip is missing one of its controls" + where);
+                if (type == nullptr || level == nullptr || mute == nullptr || solo == nullptr)
+                    return;
+
+                if (i == j)
+                {
+                    expectEquals(type->getSelectedItemIndex(), (int) ParamIDs::LayerType::click,
+                                 "Type combo did not follow its parameter" + where);
+                    expectWithinAbsoluteError(level->getValue(), 0.33, 1.0e-5,
+                                               "Level slider did not follow its parameter" + where);
+                    expect(mute->getToggleState(), "Mute button did not follow its parameter" + where);
+                    expect(solo->getToggleState(), "Solo button did not follow its parameter" + where);
+                }
+                else
+                {
+                    expect(type->getSelectedItemIndex() != (int) ParamIDs::LayerType::click,
+                           "Strip followed another layer's type, so it is wired to the wrong layer" + where);
+                    expect(! mute->getToggleState(),
+                           "Strip followed another layer's mute, so it is wired to the wrong layer" + where);
+                    expect(! solo->getToggleState(),
+                           "Strip followed another layer's solo, so it is wired to the wrong layer" + where);
+                }
+            }
+
+            // Restored so the next iteration's "every other strip is at its default" still holds.
+            setParamValue(processor, layerId(i, "type"),
+                          (float) (i == 0 ? (int) ParamIDs::LayerType::sub
+                                          : (int) ParamIDs::LayerType::off));
+            setParamValue(processor, layerId(i, "level"), 1.0f);
+            setParamValue(processor, layerId(i, "mute"),  0.0f);
+            setParamValue(processor, layerId(i, "solo"),  0.0f);
+        }
+    }
+
+    void testStripMovesItsOwnParameters()
+    {
+        beginTest("(c) Operating a strip's controls moves that layer's parameters and no other's");
+
+        DOOFAudioProcessor processor;
+        auto strips = makeStrips(processor);
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            auto* type  = control<juce::ComboBox>  (*strips[(size_t) i], LayerStrip::typeBoxID);
+            auto* level = control<juce::Slider>    (*strips[(size_t) i], LayerStrip::levelSliderID);
+            auto* solo  = control<juce::TextButton>(*strips[(size_t) i], LayerStrip::soloButtonID);
+
+            expect(type != nullptr && level != nullptr && solo != nullptr, "A strip is missing a control");
+            if (type == nullptr || level == nullptr || solo == nullptr)
+                return;
+
+            // sendNotificationSync, so the attachment has written through before we read back.
+            type->setSelectedItemIndex((int) ParamIDs::LayerType::click, juce::sendNotificationSync);
+            level->setValue(0.42, juce::sendNotificationSync);
+            solo->setToggleState(true, juce::sendNotificationSync);
+
+            const auto where = " (drove strip " + juce::String(i + 1) + ")";
+
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "type")),
+                                       (float) (int) ParamIDs::LayerType::click, 1.0e-6f,
+                                       "Type combo did not reach its parameter" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "level")), 0.42f, 1.0e-5f,
+                                       "Level slider did not reach its parameter" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "solo")), 1.0f, 1.0e-6f,
+                                       "Solo button did not reach its parameter" + where);
+
+            for (int j = 0; j < processor.getNumLayers(); ++j)
+                if (j != i)
+                    expectWithinAbsoluteError(rawParam(processor, layerId(j, "level")), 1.0f, 1.0e-6f,
+                                               "Driving one strip changed layer " + juce::String(j + 1)
+                                                 + "'s level" + where);
+
+            type->setSelectedItemIndex(i == 0 ? (int) ParamIDs::LayerType::sub
+                                              : (int) ParamIDs::LayerType::off, juce::sendNotificationSync);
+            level->setValue(1.0, juce::sendNotificationSync);
+            solo->setToggleState(false, juce::sendNotificationSync);
+        }
+    }
+};
+
+static Phase4LayerStripTest phase4LayerStripTest;
 
 
 
