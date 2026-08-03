@@ -15,21 +15,26 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
                      p.getLayer(0).ampModel,   juce::Range<double>(0.0, 1.0),
                      juce::jmax(p.getLayer(0).pitchModel.getLength(), p.getLayer(0).ampModel.getLength()), p)
 {
+    // Each of these writes the preference back to the selected layer as well as applying it, so
+    // switching away and back restores what you were looking at rather than the previous layer's
+    // view. setSelectedLayer pushes the other direction.
     pitchLogToggle.onClick = [this]
     {
-        envelopeCanvas.setPitchLogScale(pitchLogToggle.getToggleState());
+        const bool useLog = pitchLogToggle.getToggleState();
+        audioProcessor.getLayerViewPrefs(selectedLayer).pitchLogScale = useLog;
+        envelopeCanvas.setPitchLogScale(useLog);
     };
     undoButton.onClick = [this] { performUndo(); };
     redoButton.onClick = [this] { performRedo(); };
 
-    editingCurveBox.addItem("Pitch", 1);
-    editingCurveBox.addItem("Amp",   2);
-    editingCurveBox.setSelectedId(1, juce::dontSendNotification);
+    editingCurveBox.addItem("Pitch", kEditingPitchId);
+    editingCurveBox.addItem("Amp",   kEditingAmpId);
     editingCurveBox.onChange = [this]
     {
-        envelopeCanvas.setActiveCurve(editingCurveBox.getSelectedId() == 1
-                                           ? EnvelopeCanvas::ActiveCurve::pitch
-                                           : EnvelopeCanvas::ActiveCurve::amp);
+        const bool editingPitch = (editingCurveBox.getSelectedId() == kEditingPitchId);
+        audioProcessor.getLayerViewPrefs(selectedLayer).editingPitch = editingPitch;
+        envelopeCanvas.setActiveCurve(editingPitch ? EnvelopeCanvas::ActiveCurve::pitch
+                                                   : EnvelopeCanvas::ActiveCurve::amp);
     };
 
     // Matches the range EnvelopeCanvas's own Length-handle drag enforces
@@ -50,7 +55,7 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     {
         const double clamped = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds,
                                              pitchLengthValue.getText().getDoubleValue());
-        audioProcessor.getLayer(0).pitchModel.setLength(clamped);
+        audioProcessor.getLayer(selectedLayer).pitchModel.setLength(clamped);
         refreshLengthLabels();
         envelopeCanvas.repaint();
     };
@@ -59,7 +64,7 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     {
         const double clamped = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds,
                                              ampLengthValue.getText().getDoubleValue());
-        audioProcessor.getLayer(0).ampModel.setLength(clamped);
+        audioProcessor.getLayer(selectedLayer).ampModel.setLength(clamped);
         refreshLengthLabels();
         envelopeCanvas.repaint();
     };
@@ -156,6 +161,12 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     addAndMakeVisible(loadPresetButton);
     setSize(800, 600);
 
+    // The editor is always built against state that already exists - plugin open, preset load,
+    // session restore - so the toolbar has to show the selected layer's stored view immediately
+    // rather than only from the first layer switch onwards.
+    applyViewPrefsToUI();
+    refreshLengthLabels();
+
     // After setSize, so the placeholder already has the canvas's bounds if it is the one shown.
     refreshContextualPanel();
     startTimerHz(kPollHz);
@@ -219,6 +230,25 @@ void DOOFAudioProcessorEditor::resized()
     contextualPlaceholder.setBounds(bounds);
 }
 
+void DOOFAudioProcessorEditor::applyViewPrefsToUI()
+{
+    const auto& prefs = audioProcessor.getLayerViewPrefs(selectedLayer);
+
+    // dontSendNotification because the callback would only write back the value just read. What
+    // actually keeps a switch from writing onto the wrong layer is the order in setSelectedLayer:
+    // selectedLayer is assigned before this runs. Suppressing the notification too means that
+    // ordering is not the single thing standing between a layer switch and silent data loss.
+    pitchLogToggle.setToggleState(prefs.pitchLogScale, juce::dontSendNotification);
+    editingCurveBox.setSelectedId(prefs.editingPitch ? kEditingPitchId : kEditingAmpId,
+                                   juce::dontSendNotification);
+
+    // Which means the canvas has to be told directly, since the callbacks that normally do it
+    // were just suppressed.
+    envelopeCanvas.setPitchLogScale(prefs.pitchLogScale);
+    envelopeCanvas.setActiveCurve(prefs.editingPitch ? EnvelopeCanvas::ActiveCurve::pitch
+                                                      : EnvelopeCanvas::ActiveCurve::amp);
+}
+
 void DOOFAudioProcessorEditor::refreshContextualPanel()
 {
     const int type = (int) layerTypeParams[(size_t) selectedLayer]->load();
@@ -274,6 +304,11 @@ void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)
     auto& layer = audioProcessor.getLayer(layerIndex);
     envelopeCanvas.setModels(layer.pitchModel, layer.ampModel);
 
+    // Both read selectedLayer, so both must run after the assignment above. Running
+    // applyViewPrefsToUI first would push the incoming layer's view onto the outgoing one.
+    applyViewPrefsToUI();
+    refreshLengthLabels();
+
     // Immediately, rather than waiting up to a frame for the poll to notice: a click should swap
     // the panel on the same gesture, not visibly a moment later.
     refreshContextualPanel();
@@ -310,8 +345,8 @@ void DOOFAudioProcessorEditor::performRedo()
 
 void DOOFAudioProcessorEditor::refreshLengthLabels()
 {
-    pitchLengthValue.setText(juce::String(audioProcessor.getLayer(0).pitchModel.getLength(), 3),
+    pitchLengthValue.setText(juce::String(audioProcessor.getLayer(selectedLayer).pitchModel.getLength(), 3),
                               juce::dontSendNotification);
-    ampLengthValue.setText(juce::String(audioProcessor.getLayer(0).ampModel.getLength(), 3),
+    ampLengthValue.setText(juce::String(audioProcessor.getLayer(selectedLayer).ampModel.getLength(), 3),
                             juce::dontSendNotification);
 }

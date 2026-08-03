@@ -41,6 +41,17 @@ private:
     void performUndo();
     void performRedo();
 
+    // Pushes the selected layer's stored view preferences into the log toggle, the editing-curve
+    // selector and the canvas. Deliberately notifies nothing: the widgets' own callbacks write
+    // preferences *back*, so letting them fire here would have the layer being switched to
+    // immediately overwrite itself with whatever the widgets happened to be showing.
+    void applyViewPrefsToUI();
+
+    // Item IDs for editingCurveBox. Named because the mapping to LayerViewPrefs::editingPitch is
+    // now read in two directions, and a bare 1/2 at each site is easy to get backwards.
+    static constexpr int kEditingPitchId = 1;
+    static constexpr int kEditingAmpId   = 2;
+
     // Re-reads both models' Length into the numeric fields below. Called
     // after the canvas's Length handle is dragged, and whenever a field's
     // own edit is committed (to reflect any clamping the model applied).

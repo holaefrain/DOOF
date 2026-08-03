@@ -1467,6 +1467,8 @@ public:
     {
         testPanelFollowsTheSelectedLayersType();
         testToolbarHidesWithTheCanvas();
+        testToolbarFollowsTheSelectedLayer();
+        testLengthFieldsFollowTheSelectedLayer();
         testAutomatingTheTypeSwapsThePanelWithoutAClick();
     }
 
@@ -1592,9 +1594,103 @@ private:
                "The preset buttons were hidden with the canvas, but they are global");
     }
 
+    // Finds a control by the text it displays, since the editor publishes a component ID only for
+    // the placeholder. Buttons and combo boxes are named distinctly enough for this to be exact.
+    template <typename ControlType>
+    static ControlType* controlNamed(juce::Component& parent, const juce::String& name)
+    {
+        for (auto* child : parent.getChildren())
+            if (auto* typed = dynamic_cast<ControlType*>(child))
+                if (typed->getName() == name || typed->getComponentID() == name)
+                    return typed;
+        return nullptr;
+    }
+
+    void testToolbarFollowsTheSelectedLayer()
+    {
+        beginTest("(d) The log toggle and editing curve are remembered per layer");
+
+        Editor e;
+        // Every layer Sub, so the toolbar is visible whichever one is selected.
+        for (int i = 0; i < e.processor.getNumLayers(); ++i)
+            setParamValue(e.processor, "layer" + juce::String(i + 1) + ".type",
+                          (float) (int) ParamIDs::LayerType::sub);
+        open(e);
+
+        auto* logToggle = controlNamed<juce::ToggleButton>(*e.editor, "Log Scale (Pitch)");
+        expect(logToggle != nullptr, "Could not find the log toggle");
+        if (logToggle == nullptr)
+            return;
+
+        // Layer 1: turn log on, the way a user would.
+        logToggle->setToggleState(true, juce::sendNotificationSync);
+        expect(e.processor.getLayerViewPrefs(0).pitchLogScale,
+               "Toggling log did not reach the selected layer's preferences");
+
+        // Layer 2 has never been touched, so it must show the default rather than layer 1's.
+        clickStrip(e, 1);
+        expect(! logToggle->getToggleState(),
+               "Switching layers carried the previous layer's log setting across");
+        expect(! e.processor.getLayerViewPrefs(1).pitchLogScale,
+               "Merely selecting a layer wrote a preference onto it");
+
+        // The write-back is the hazard: pushing a preference into the toggle fires its callback
+        // unless suppressed, which would have layer 2 overwrite itself with layer 1's value.
+        expect(e.processor.getLayerViewPrefs(0).pitchLogScale,
+               "Selecting layer 2 clobbered layer 1's stored log setting");
+
+        // And back again restores it.
+        clickStrip(e, 0);
+        expect(logToggle->getToggleState(),
+               "Returning to layer 1 did not restore its log setting");
+    }
+
+    void testLengthFieldsFollowTheSelectedLayer()
+    {
+        beginTest("(e) The Length fields read and write the selected layer's models");
+
+        Editor e;
+        for (int i = 0; i < e.processor.getNumLayers(); ++i)
+            setParamValue(e.processor, "layer" + juce::String(i + 1) + ".type",
+                          (float) (int) ParamIDs::LayerType::sub);
+
+        // Distinct lengths set before the editor exists, so the fields must read them on open.
+        e.processor.getLayer(0).pitchModel.setLength(0.11);
+        e.processor.getLayer(2).pitchModel.setLength(0.33);
+        open(e);
+
+        auto* pitchLength = controlNamed<juce::Label>(*e.editor, "");
+        juce::Array<juce::Label*> editableLabels;
+        for (auto* child : e.editor->getChildren())
+            if (auto* label = dynamic_cast<juce::Label*>(child))
+                if (label->isEditable())
+                    editableLabels.add(label);
+
+        expect(editableLabels.size() == 2, "Expected exactly two editable Length fields, found "
+                                             + juce::String(editableLabels.size()));
+        if (editableLabels.size() != 2)
+            return;
+
+        pitchLength = editableLabels[0];
+
+        expectWithinAbsoluteError(pitchLength->getText().getDoubleValue(), 0.11, 1.0e-3,
+                                   "The pitch Length field did not show layer 1's length on open");
+
+        clickStrip(e, 2);
+        expectWithinAbsoluteError(pitchLength->getText().getDoubleValue(), 0.33, 1.0e-3,
+                                   "The pitch Length field did not follow the selection to layer 3");
+
+        // Editing the field must reach layer 3, and must leave layer 1 alone.
+        pitchLength->setText("0.44", juce::sendNotificationSync);
+        expectWithinAbsoluteError(e.processor.getLayer(2).pitchModel.getLength(), 0.44, 1.0e-9,
+                                   "Editing the Length field did not reach the selected layer");
+        expectWithinAbsoluteError(e.processor.getLayer(0).pitchModel.getLength(), 0.11, 1.0e-9,
+                                   "Editing the Length field reached layer 1 as well");
+    }
+
     void testAutomatingTheTypeSwapsThePanelWithoutAClick()
     {
-        beginTest("(c) Automating the selected layer's type swaps the panel with no click");
+        beginTest("(f) Automating the selected layer's type swaps the panel with no click");
 
         Editor e;
         open(e);
