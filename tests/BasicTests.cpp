@@ -142,7 +142,7 @@ private:
 
         expect(earlyRms > midRms,  "Early RMS should exceed mid RMS (envelope decaying)");
         expect(midRms   > lateRms, "Mid RMS should exceed late RMS (envelope still decaying)");
-        expect(lateRms  < 0.002,   "Late RMS should be near-zero at 2.5–3 s (tail fully decayed)");
+        expect(lateRms  < 0.002,   "Late RMS should be near-zero at 2.5 to 3 s (tail fully decayed)");
     }
 
     // (b) Pitch envelope: zero-crossing rate should be higher in an early window than

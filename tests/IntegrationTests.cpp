@@ -282,7 +282,7 @@ private:
 
         expectWithinAbsoluteError(valueOnLayer(0), 999.0, 1.0e-9, "Layer 0's own edit did not apply");
         expectWithinAbsoluteError(valueOnLayer(1), originalOnLayer1, 1.0e-9,
-                                   "Editing layer 0 also changed layer 1 — the layers share state");
+                                   "Editing layer 0 also changed layer 1 - the layers share state");
 
         // The edited layer must republish; the untouched one must not be forced to.
         const auto* snapshot = processor.getLayer(0).publisher.getSnapshot();
@@ -319,10 +319,12 @@ public:
         testSuperpositionAndNoClipping();
         testMultiSoloIsolatesTheSoloedLayers();
         testMuteBeatsSoloThroughTheEngine();
+        testMuteMidTailDoesNotClick();
     }
 
 private:
     static constexpr int kNumSamples = 4096;
+    static constexpr int kBlockSize  = 256;
     static constexpr double kSampleRate = 44100.0;
 
     // Writes a parameter by its real-world value (a choice index for type, 0/1
@@ -412,6 +414,41 @@ private:
         return out;
     }
 
+    // Renders block by block so a parameter can change between blocks with the note still ringing.
+    // render() can't: it re-prepares each time, so the smoothers jump and skip the ramp (d) measures.
+    // muteAfterSamples must land on a block boundary, as a host change would; -1 means never mute.
+    static std::vector<float> renderInBlocks(DOOFAudioProcessor& processor,
+                                              int layerIndex, int muteAfterSamples)
+    {
+        jassert(muteAfterSamples < 0 || muteAfterSamples % kBlockSize == 0);
+
+        setParamValue(processor, layerId(layerIndex, "mute"), 0.0f);
+        processor.prepareToPlay(kSampleRate, kBlockSize);
+
+        std::vector<float> out;
+        out.reserve((size_t) kNumSamples);
+
+        juce::AudioBuffer<float> buffer(2, kBlockSize);
+
+        for (int start = 0; start < kNumSamples; start += kBlockSize)
+        {
+            if (start == muteAfterSamples)
+                setParamValue(processor, layerId(layerIndex, "mute"), 1.0f);
+
+            juce::MidiBuffer midi;
+            if (start == 0)
+                midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+
+            processor.processBlock(buffer, midi);
+
+            const auto* channel = buffer.getReadPointer(0);
+            for (int i = 0; i < kBlockSize; ++i)
+                out.push_back(channel[i]);
+        }
+
+        return out;
+    }
+
     void testSuperpositionAndNoClipping()
     {
         beginTest("(a) Five layers at unity: mix equals the sum of the parts, stays finite");
@@ -456,7 +493,7 @@ private:
         for (size_t a = 1; a < individual.size(); ++a)
             expect(zeroCrossings(individual[a]) > zeroCrossings(individual[a - 1]),
                    "Layer " + juce::String((int) a) + " should sound higher than layer "
-                     + juce::String((int) a - 1) + " given the pitches assigned, but does not — "
+                     + juce::String((int) a - 1) + " given the pitches assigned, but does not - "
                        "the mixer is not reading each layer's own voice ("
                      + crossingReport.trim() + ")");
 
@@ -558,6 +595,69 @@ private:
         expectWithinAbsoluteError(peak, 0.0f, 1.0e-7f,
                                    "Expected silence: mute beats solo on the soloed layer, and its "
                                    "solo keeps every other layer out of the mix");
+    }
+
+    // Muting a ringing layer must not click: without the gain ramp its output would drop to zero
+    // between two adjacent samples, leaving a step the size of whatever it was putting out.
+    // Threshold and method are Phase 1's choke test - a step past 0.1 is audible whatever caused it.
+    void testMuteMidTailDoesNotClick()
+    {
+        beginTest("(d) Muting mid-tail ramps down instead of clicking");
+
+        static constexpr float kMaxJump = 0.1f;   // Phase 1's choke-test threshold
+        static constexpr int   kMuteAt  = 2048;   // ~46 ms in: attack over, tail still loud
+
+        // One audible layer, so muting it drops the whole output rather than a fifth of it.
+        DOOFAudioProcessor processor;
+        setParamValue(processor, layerId(0, "type"), (float) (int) ParamIDs::LayerType::sub);
+        setParamValue(processor, layerId(0, "level"), 1.0f);
+        for (int i = 1; i < processor.getNumLayers(); ++i)
+            setParamValue(processor, layerId(i, "type"), (float) (int) ParamIDs::LayerType::off);
+
+        const auto rendered = renderInBlocks(processor, 0, kMuteAt);
+
+        // Near a zero crossing an unramped cut leaves no step, so the check below would pass
+        // with no smoothing at all. This pins down that a hard cut here really would breach kMaxJump.
+        const float atFlip = std::abs(rendered[(size_t) kMuteAt - 1]);
+        expect(atFlip > kMaxJump,
+               "Layer was only at " + juce::String(atFlip, 4) + " when muted, below the "
+               + juce::String(kMaxJump, 2) + " click threshold, so this test would pass "
+                 "without any smoothing at all - move kMuteAt");
+
+        float worstJump = 0.0f;
+        int   worstAt   = -1;
+
+        for (size_t i = 1; i < rendered.size(); ++i)
+        {
+            const float jump = std::abs(rendered[i] - rendered[i - 1]);
+            if (jump > worstJump) { worstJump = jump; worstAt = (int) i; }
+        }
+
+        expect(worstJump <= kMaxJump,
+               "Sample jump " + juce::String(worstJump, 4) + " at sample "
+                 + juce::String(worstAt) + " exceeds the " + juce::String(kMaxJump, 2)
+                 + " click threshold - the mute is stepping, not ramping");
+
+        // The mute must actually land, or the no-click result above holds trivially.
+        // Measured against an unmuted baseline, not as absolute silence: the DC blocker is a
+        // one-pole high-pass, so when its input stops it rings down over ~16 ms rather than dead.
+        const auto baseline = renderInBlocks(processor, 0, -1);
+
+        auto peakOverLastQuarter = [](const std::vector<float>& samples)
+        {
+            float peak = 0.0f;
+            for (size_t i = samples.size() * 3 / 4; i < samples.size(); ++i)
+                peak = juce::jmax(peak, std::abs(samples[i]));
+            return peak;
+        };
+
+        const float mutedPeak    = peakOverLastQuarter(rendered);
+        const float baselinePeak = peakOverLastQuarter(baseline);
+
+        expect(mutedPeak < baselinePeak * 0.05f,
+               "Muted render is still at " + juce::String(mutedPeak, 4) + " against an unmuted "
+                 + juce::String(baselinePeak, 4) + " over the same window, so the mute never took "
+                   "effect and the no-click result above is meaningless");
     }
 };
 
