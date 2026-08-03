@@ -24,7 +24,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 1 | Engine skeleton + one audible sub | Complete | ✅ |
 | 2 | Node-based envelope engine | Complete | ✅ |
 | 3 | Envelope canvas (GUI) + minimal preset save/load | Complete | ✅ |
-| 4 | Layers + mixer | Not started | — |
+| 4 | Layers + mixer | Complete | ✅ |
 | 5 | Click layers | Not started | — |
 | 6 | Sub tuning + phase tools | Not started | — |
 | 7 | FX suite + routing matrix | Not started | — |
@@ -54,6 +54,69 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 ---
 
 ## Sessions
+
+---
+
+### Session 2026-08-02
+
+**Goal:** Phase 4 — five layers, per-layer type/level/mute/solo, multi-solo per §3.3, the horizontal layer selector, and swapping the contextual panel with the selected layer's type.
+
+**Phase 4 built, step by step:**
+
+1. **Audibility rule first, in isolation** — `src/LayerAudibility.h/.cpp`: §3.3's truth table as a pure function, deliberately free of any JUCE dependency so the engine, the GUI's dimming, and the lean `DOOFTests` target all call the *same* function. This is what makes it structurally impossible for the displayed state to disagree with what is audible.
+2. **Parameters** — `src/ParamIDs.h` (shared, so nothing builds ID strings by hand) adds 20 parameters: per layer `type` (Off/Sub/Click), `level`, `mute`, `solo`. `sub.gain` is unchanged at 0.8 and the defaults are chosen so the out-of-the-box patch is bit-identical to pre-Phase-4 — every Phase 1/2/3 render assertion stays valid verbatim.
+3. **Five layers** — `src/Layer.h` bundles one layer's pitch model, amp model, publisher and voice. Held as `std::array<std::unique_ptr<Layer>, 5>` because `Layer` is neither default-constructible nor movable (its publisher holds references to the two models beside it). One publisher per layer, so editing a layer rebuilds two lookup tables rather than ten.
+4. **Mixer** — `processBlock` sums all five layers through smoothed per-layer gains driven by the audibility rule. 5 ms ramp, matching `SubVoice`'s own choke fade.
+5. **State** — preset/session state re-nested under `LAYER { index }` children with an explicit root `version`. Layer view preferences added at version 3.
+6. **Layer selector** — `src/LayerStrip.h/.cpp`, one self-contained cell per layer (§0.5: panels have no opinion about where they sit), all controls APVTS-attached.
+7. **Canvas retargeting + contextual panel** — the canvas points at the selected layer; Sub shows it, Click and Off replace it with a placeholder.
+
+**Bugs/issues found and fixed during Phase 4:**
+
+1. **Seeding filled the entire undo history** — the factory patch went through the normal undoable edit path, leaving ~70 transactions across ten models. That both filled the whole 30-step cap with factory setup and let Cmd+Z at startup dismantle the default patch. Latent since Phase 3 at two models; five layers made it 5× worse. Fixed with `clearUndoHistory()` after seeding.
+2. **A gesture could be orphaned by a layer switch** — a gesture is begun in `mouseDown` on one model and ended in `mouseUp` on whatever `modelFor()` returns *by then*. Switching layers mid-drag left the outgoing model inside an open transaction forever, and since `addNode` skips `beginNewTransaction` while in a gesture, **every later edit on that layer silently coalesced into it** — one Cmd+Z would then discard an unbounded amount of work. Fixed with `cancelActiveGesture()`, which runs before the pointers move so each gesture ends on the model it began on.
+3. **Mute was invisible** — the default `TextButton` on/off colours are near-identical at this size, so a muted layer looked exactly like an unmuted one. Found only by rendering the editor to a PNG and looking at it; no unit test could have caught it, since the toggle *state* was correct throughout. Fixed with explicit red/amber on-colours.
+4. **Non-ASCII in string literals** — an em-dash and an en-dash inside `expect` messages tripped JUCE's `CharPointer_ASCII` assertion (`juce_String.cpp:327`), which fires on any non-ASCII `char*` since JUCE can't infer the source encoding. Both pre-existing. Comments are unaffected — only literals matter.
+5. **`resetLayerParametersToDefaults` was dead code** — added under the belief that JUCE keeps a parameter's *current* value when the loaded state omits it. It doesn't: `updateParameterConnectionsToChildTrees` appends a bare `PARAM` child, and `valueTreeChildAdded` → `setNewState` then reads `getProperty(value, getDenormalisedDefaultValue())`, falling through to the default. Confirmed empirically, then removed. **The view preferences are the genuine exception** — nothing resets those, so their explicit reset on the legacy path is load-bearing.
+
+**Decisions made this session:**
+- **A soloed *Off* layer does not count as soloed.** §3.3 says only "≥1 layer soloed" and doesn't address type; the literal reading would silence the whole patch with no visible cause. One line plus two assertions to flip.
+- **"Dimmed" is narrower than "silent."** §3.3 reserves dimming for a layer silenced *because of someone else's solo*; a muted or Off layer already shows why through its own controls. Expressed as `!isAudible(flags, anySoloed) && isAudible(flags, false)` — a difference of the shared rule, so it cannot drift from the mixer's view of what silences a layer.
+- **Layers are summed straight, not divided by the active count** — dividing would change every other layer's sound whenever one was enabled. Five layers at unity therefore exceed full scale, which is arithmetic, not a defect; the master limiter that tames it is Phase 9.
+- **Zoom/pan is camera state, not layer data** — it stays put across a layer switch, so two layers can be compared at the same time window.
+- **Log scale and editing curve are per layer** (user decision), which is what took the preset schema to version 3.
+- **View preferences live in the processor, not the editor** — the host may close and reopen the editor at any point, and they persist in the preset.
+- `JUCE_MODAL_LOOPS_PERMITTED=1` on the **test target only**, so tests can pump the message loop and observe the ~30 fps GUI polls actually firing. Never on the `DOOF` target — modal loops inside a plugin are a hosting hazard.
+
+**On verification method (worth carrying into Phase 5):**
+
+Every test written this phase was checked by deliberately breaking the production code and confirming the failure. That caught **four tests that passed while proving nothing**, none of which would have been found by running the suite normally:
+
+- An undo test that asserted on node counts — the shared `UndoManager` meant `undo()` popped a *different* model's transaction, so the assertion held either way.
+- A superposition test blind to every layer reading layer 0's voice: that voice is advanced once per layer per sample, so each layer-alone render picks off a different one of five consecutive samples — genuinely different signals that still sum consistently. **Self-consistent assertions cannot catch this**; an absolute check (each layer given a higher pitch must show strictly more zero crossings) is what closes it.
+- Two tests that mutated state before asserting, and so could never see initialisation bugs. A GUI is always constructed against state that already exists — plugin open, preset load, session restore — so **every component needs at least one assertion that touches nothing first**.
+- A Phase 3 preset load that didn't check view preferences, leaving the one genuinely load-bearing reset untested.
+
+Two smaller lessons: a "nothing changed" refactor claim deserves a real null test (the canvas pointer refactor was confirmed byte-identical in both its rendered output and a scripted interaction fingerprint), and **rendering the editor to a PNG via `createComponentSnapshot` needs no window and no new tooling** — it is how the invisible-mute bug was found, and how §6's "the rest visibly dim" was actually checked rather than assumed.
+
+**Verify result (Phase 4 §6):** All green.
+
+| §6 check | Result |
+|---|---|
+| Audibility function against all 16 truth-table combinations | ✅ table written out by hand, not derived from the implementation |
+| Solo layers 1 and 3 — only those audible, the rest visibly dim | ✅ engine test + confirmed by rendered screenshot |
+| Mute on a soloed layer — silent (mute wins) | ✅ |
+| All layers at unity — no unexpected clipping | ✅ mix equals the sum of the parts; asserts peak > 1.0 so the test is genuinely in the clipping regime |
+| Click between layers while a note rings — no dropout | ✅ stated as a null test: the render is bit-identical with and without switching |
+
+57 subtests across both binaries, 0 failures, clean build. **Not covered by automated test:** that the ~30 fps polls skip their repaint when nothing changed (an unparented component never paints), and that a click landing on a strip's *child control* also selects the layer (needs real event dispatch).
+
+**Still outstanding:** the DAW pass for host-dependent behaviour (parameter automation from the host, session save/restore through the host rather than through `.doof`).
+
+**Next steps:** Phase 5 — Click layers. The contextual panel already has its placeholder in place.
+
+**Open questions this session:**
+- Storing view preferences in the preset means a shared preset carries its author's log-scale setting. Fine for personal patches, mildly odd for factory content. Splitting session state from preset state is real work since `getStateInformation` is the same blob for both — revisit at Phase 11 when the preset browser exists.
 
 ---
 

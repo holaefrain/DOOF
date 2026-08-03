@@ -1352,6 +1352,7 @@ public:
     {
         testSelectingALayerRetargetsTheCanvas();
         testSwappingMidDragLeavesNoOpenTransaction();
+        testSwitchingLayersWhileANoteRingsDoesNotDisturbTheAudio();
     }
 
 private:
@@ -1406,6 +1407,89 @@ private:
                      "Editing the canvas after selecting layer 3 did not reach layer 3");
         expectEquals(processor.getLayer(0).pitchModel.getNumNodes(), before1,
                      "Editing the canvas after selecting layer 3 still reached layer 1");
+    }
+
+    // §6's "click between layers while a note rings - no audio dropout". Stated as a null test
+    // rather than as a click/glitch threshold: selecting a layer is a GUI action that must not
+    // reach the audio thread at all, so the rendered block should come out bit-identical to the
+    // same render with nobody touching the interface. Anything weaker would tolerate a small
+    // disturbance, and there is no reason to allow one.
+    void testSwitchingLayersWhileANoteRingsDoesNotDisturbTheAudio()
+    {
+        beginTest("(c) Clicking between layers while a note rings leaves the audio untouched");
+
+        static constexpr int blockSize  = 256;
+        static constexpr int numBlocks  = 16;
+        static constexpr double sampleRate = 44100.0;
+
+        // withSwitching renders the same note while clicking through the layer strips between
+        // blocks, exactly as a user auditioning layers mid-tail would.
+        auto render = [](bool withSwitching)
+        {
+            DOOFAudioProcessor processor;
+            std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
+            editor->setBounds(0, 0, 800, 600);
+
+            auto strips = childrenOfType<LayerStrip>(*editor);
+
+            processor.prepareToPlay(sampleRate, blockSize);
+
+            std::vector<float> out;
+            juce::AudioBuffer<float> buffer(2, blockSize);
+
+            for (int block = 0; block < numBlocks; ++block)
+            {
+                if (withSwitching && strips.size() > 0)
+                {
+                    auto* strip = strips[block % strips.size()];
+                    strip->mouseDown(juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(),
+                                                       {}, juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                       strip, strip, juce::Time::getCurrentTime(), {},
+                                                       juce::Time::getCurrentTime(), 1, false));
+                }
+
+                juce::MidiBuffer midi;
+                if (block == 0)
+                    midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+
+                processor.processBlock(buffer, midi);
+
+                const auto* channel = buffer.getReadPointer(0);
+                for (int i = 0; i < blockSize; ++i)
+                    out.push_back(channel[i]);
+            }
+
+            return out;
+        };
+
+        const auto quiet    = render(false);
+        const auto switched = render(true);
+
+        expectEquals((int) switched.size(), (int) quiet.size(), "Renders are different lengths");
+        if (switched.size() != quiet.size())
+            return;
+
+        double worstDifference = 0.0;
+        int worstAt = -1;
+        for (size_t i = 0; i < quiet.size(); ++i)
+        {
+            const double difference = std::abs((double) switched[i] - (double) quiet[i]);
+            if (difference > worstDifference) { worstDifference = difference; worstAt = (int) i; }
+        }
+
+        expect(worstDifference == 0.0,
+               "Switching layers changed the audio (worst difference " + juce::String(worstDifference)
+                 + " at sample " + juce::String(worstAt) + "), so a GUI action is reaching the "
+                   "audio thread");
+
+        // Guards against both renders being silent, which would satisfy the comparison above
+        // while proving nothing about dropouts.
+        float peak = 0.0f;
+        for (const auto sample : quiet)
+            peak = juce::jmax(peak, std::abs(sample));
+
+        expect(peak > 0.1f, "The reference render is near-silent (peak " + juce::String(peak)
+                              + "), so there was no ringing note to interrupt");
     }
 
     void testSwappingMidDragLeavesNoOpenTransaction()
@@ -1718,6 +1802,8 @@ private:
 };
 
 static Phase4ContextualPanelTest phase4ContextualPanelTest;
+
+
 
 
 
