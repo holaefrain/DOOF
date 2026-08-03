@@ -390,12 +390,10 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
     // No version means Phase 3's flat layout: two ENVELOPE trees on the root, describing layer 1.
     const bool isLayered = root.hasProperty(PresetIDs::versionProp);
 
-    // Done before replaceState, not after: JUCE keeps a parameter's *current* value when the
-    // loaded state has no entry for it, so an old preset would otherwise inherit whatever the
-    // session happened to have on layers 2-5 and load differently every time.
-    if (! isLayered)
-        resetLayerParametersToDefaults();
-
+    // The mixer parameters need no special handling for a pre-mixer preset: replaceState appends
+    // a bare PARAM child for every parameter the loaded tree omits, and reading that child back
+    // falls through to the parameter's default. Verified against JUCE rather than assumed, and
+    // pinned by Phase4StateTest (b) since a pre-mixer preset loading correctly depends on it.
     const auto apvtsState = root.getChildWithName(apvts.state.getType());
     if (apvtsState.isValid())
         apvts.replaceState(apvtsState);
@@ -454,16 +452,6 @@ void DOOFAudioProcessor::seedLayerWithDefaults(int index)
 
     DefaultEnvelopes::seedPitch(layer.pitchModel);
     DefaultEnvelopes::seedAmp(layer.ampModel);
-}
-
-// Returns every per-layer mixer parameter to its default, leaving the master gain alone since a
-// Phase 3 preset does carry that one. See the call site for why this is needed at all.
-void DOOFAudioProcessor::resetLayerParametersToDefaults()
-{
-    for (auto* parameter : getParameters())
-        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameter))
-            if (ranged->paramID != ParamIDs::subGain)
-                ranged->setValueNotifyingHost(ranged->getDefaultValue());
 }
 
 // Entry point called by the host to create a new plugin instance.

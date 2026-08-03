@@ -663,6 +663,271 @@ private:
 
 static Phase4MixerTest phase4MixerTest;
 
+// Phase4StateTest — Phase 4 §6 Verify: a preset carries all five layers, and presets written
+// before the mixer existed still load.
+//
+// Every schema string below is written out as a literal rather than taken from PluginProcessor's
+// PresetIDs. Those names can never be renamed once a preset has shipped (§2), and a test that
+// asked the production code for the name would follow a rename along and keep passing. Spelling
+// them out means changing the format breaks this test, which is the alarm we want. PresetIDs has
+// internal linkage anyway, so this is also the only option.
+class Phase4StateTest : public juce::UnitTest
+{
+public:
+    Phase4StateTest() : juce::UnitTest("Phase4State") {}
+
+    void runTest() override
+    {
+        testAllFiveLayersSurviveARoundTrip();
+        testPhase3PresetStillLoads();
+    }
+
+private:
+    static constexpr int kNumSamples = 4096;
+    static constexpr double kSampleRate = 44100.0;
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    static float rawParam(DOOFAudioProcessor& processor, const juce::String& id)
+    {
+        auto* value = processor.apvts.getRawParameterValue(id);
+        return value != nullptr ? value->load() : std::numeric_limits<float>::quiet_NaN();
+    }
+
+    static juce::String layerId(int index, const juce::String& suffix)
+    {
+        return "layer" + juce::String(index + 1) + "." + suffix;
+    }
+
+    // prepareToPlay before every render, so both renders start from an Idle voice with the gains
+    // already at target - otherwise the second noteOn would land mid-tail and choke-retrigger.
+    static std::vector<float> render(DOOFAudioProcessor& processor)
+    {
+        processor.prepareToPlay(kSampleRate, 512);
+
+        juce::AudioBuffer<float> buffer(2, kNumSamples);
+        juce::MidiBuffer midi;
+        midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+        processor.processBlock(buffer, midi);
+
+        std::vector<float> out((size_t) kNumSamples);
+        const auto* channel = buffer.getReadPointer(0);
+        for (int i = 0; i < kNumSamples; ++i)
+            out[(size_t) i] = channel[i];
+        return out;
+    }
+
+    void testAllFiveLayersSurviveARoundTrip()
+    {
+        beginTest("(a) Save, alter every layer, reload: the render null-matches and every parameter returns");
+
+        DOOFAudioProcessor processor;
+
+        // State A. Three audible Sub layers at different pitches and levels, one muted, one Off
+        // but soloed - so the render depends on type, level and mute all surviving the trip.
+        const int types[]  { 1, 1, 1, 0, 0 };      // Sub, Sub, Sub, Off, Off
+        const float levels[] { 0.7f, 0.5f, 0.3f, 0.9f, 0.2f };
+        const float mutes[]  { 0.0f, 1.0f, 0.0f, 0.0f, 0.0f };
+        const float solos[]  { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+        const double pitches[] { 90.0, 140.0, 200.0, 250.0, 300.0 };
+        const double lengths[] { 0.20, 0.25, 0.30, 0.35, 0.40 };
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            setParamValue(processor, layerId(i, "type"),  (float) types[i]);
+            setParamValue(processor, layerId(i, "level"), levels[i]);
+            setParamValue(processor, layerId(i, "mute"),  mutes[i]);
+            setParamValue(processor, layerId(i, "solo"),  solos[i]);
+
+            processor.getLayer(i).pitchModel.moveNode(0, 0.0, pitches[i]);
+            processor.getLayer(i).ampModel.setLength(lengths[i]);
+        }
+
+        const auto renderA = render(processor);
+
+        juce::MemoryBlock saved;
+        processor.getStateInformation(saved);
+
+        // State B. Everything the preset describes is changed, so reloading has real work to do
+        // and cannot pass by leaving the processor untouched.
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            setParamValue(processor, layerId(i, "type"),  (float) (int) ParamIDs::LayerType::off);
+            setParamValue(processor, layerId(i, "level"), 0.0f);
+            setParamValue(processor, layerId(i, "mute"),  1.0f);
+            setParamValue(processor, layerId(i, "solo"),  1.0f);
+
+            processor.getLayer(i).pitchModel.moveNode(0, 0.0, 777.0);
+            processor.getLayer(i).ampModel.setLength(1.9);
+        }
+
+        processor.setStateInformation(saved.getData(), (int) saved.getSize());
+
+        // Checked per layer as well as through the render: an Off layer's solo is inaudible by
+        // design (section 3.3 ignores Off layers when deciding whether anything is soloed), so
+        // the null-match alone could not tell whether solo came back.
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto where = " on layer " + juce::String(i + 1);
+
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "type")),  (float) types[i], 1.0e-6f,
+                                       "type did not survive the round trip" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "level")), levels[i], 1.0e-6f,
+                                       "level did not survive the round trip" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "mute")),  mutes[i], 1.0e-6f,
+                                       "mute did not survive the round trip" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "solo")),  solos[i], 1.0e-6f,
+                                       "solo did not survive the round trip" + where);
+
+            expectWithinAbsoluteError(processor.getLayer(i).pitchModel.getNode(0).value, pitches[i], 1.0e-6,
+                                       "pitch envelope did not survive the round trip" + where);
+            expectWithinAbsoluteError(processor.getLayer(i).ampModel.getLength(), lengths[i], 1.0e-9,
+                                       "amp envelope Length did not survive the round trip" + where);
+        }
+
+        const auto renderReloaded = render(processor);
+
+        double worstError = 0.0;
+        int worstAt = -1;
+        for (int i = 0; i < kNumSamples; ++i)
+        {
+            const double error = std::abs((double) renderA[(size_t) i] - (double) renderReloaded[(size_t) i]);
+            if (error > worstError) { worstError = error; worstAt = i; }
+        }
+
+        expect(worstError < 1.0e-7,
+               "Reloaded render does not null-match the original (worst error "
+                 + juce::String(worstError) + " at sample " + juce::String(worstAt) + ")");
+
+        // Guards the null-match above from passing on silence, which every mute/Off combination
+        // here would happily produce if the mixer parameters had come back wrong.
+        float peak = 0.0f;
+        for (int i = 0; i < kNumSamples; ++i)
+            peak = juce::jmax(peak, std::abs(renderA[(size_t) i]));
+
+        expect(peak > 0.1f, "State A renders near-silence (peak " + juce::String(peak)
+                              + "), so the null-match proves nothing");
+    }
+
+    // Builds a Phase 3 preset by hand rather than shipping a binary fixture: the expected bytes
+    // stay readable in a diff, and the format is pinned by construction instead of by a blob
+    // nobody can inspect. This is the layout preset1.doof was actually written in.
+    static juce::MemoryBlock buildPhase3Preset()
+    {
+        juce::ValueTree root { juce::Identifier("DOOFState") };   // deliberately no version property
+
+        juce::ValueTree apvtsState { juce::Identifier("DOOF_State") };
+        juce::ValueTree gain { juce::Identifier("PARAM") };
+        gain.setProperty("id", "sub.gain", nullptr);
+        gain.setProperty("value", 0.55, nullptr);
+        apvtsState.addChild(gain, -1, nullptr);
+        root.addChild(apvtsState, -1, nullptr);
+
+        // Both envelopes sat straight on the root, told apart only by curve.
+        juce::ValueTree pitch { juce::Identifier("ENVELOPE") };
+        pitch.setProperty("curve", "pitch", nullptr);
+        pitch.setProperty("length", 0.2145988110107726, nullptr);
+        pitch.addChild(makeNode(0.0, 111.0), -1, nullptr);
+        pitch.addChild(makeNode(0.3,  44.0), -1, nullptr);
+        root.addChild(pitch, -1, nullptr);
+
+        // No length property at all, matching preset1.doof - it must fall back to kDefaultLength.
+        juce::ValueTree amp { juce::Identifier("ENVELOPE") };
+        amp.setProperty("curve", "amp", nullptr);
+        amp.addChild(makeNode(0.0, 0.0), -1, nullptr);
+        amp.addChild(makeNode(0.5, 1.0), -1, nullptr);
+        root.addChild(amp, -1, nullptr);
+
+        juce::MemoryBlock block;
+        juce::AudioProcessor::copyXmlToBinary(*root.createXml(), block);
+        return block;
+    }
+
+    static juce::ValueTree makeNode(double time, double value)
+    {
+        juce::ValueTree node { juce::Identifier("NODE") };
+        node.setProperty("time", time, nullptr);
+        node.setProperty("value", value, nullptr);
+        node.setProperty("cpOutTime", time, nullptr);
+        node.setProperty("cpOutValue", value, nullptr);
+        node.setProperty("cpInTime", time, nullptr);
+        node.setProperty("cpInValue", value, nullptr);
+        return node;
+    }
+
+    void testPhase3PresetStillLoads()
+    {
+        beginTest("(b) A preset written before the mixer loads as the single-layer patch it described");
+
+        DOOFAudioProcessor processor;
+
+        // Dirtied first, so "reset to factory" is distinguishable from "never touched at all".
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            setParamValue(processor, layerId(i, "type"), (float) (int) ParamIDs::LayerType::sub);
+            setParamValue(processor, layerId(i, "level"), 0.123f);
+            setParamValue(processor, layerId(i, "solo"), 1.0f);
+            processor.getLayer(i).pitchModel.moveNode(0, 0.0, 999.0);
+            processor.getLayer(i).ampModel.setLength(1.234);
+        }
+
+        const auto preset = buildPhase3Preset();
+        processor.setStateInformation(preset.getData(), (int) preset.getSize());
+
+        // Layer 1 gets the preset's own envelopes.
+        expectEquals(processor.getLayer(0).pitchModel.getNumNodes(), 2);
+        expectWithinAbsoluteError(processor.getLayer(0).pitchModel.getNode(0).value, 111.0, 1.0e-9,
+                                   "Layer 1 did not receive the preset's pitch envelope");
+        expectWithinAbsoluteError(processor.getLayer(0).pitchModel.getLength(), 0.2145988110107726, 1.0e-12,
+                                   "Layer 1 did not receive the preset's pitch Length");
+
+        // The preset carries no Length for amp, so the default must apply rather than the 1.234
+        // left over from the outgoing patch.
+        expectWithinAbsoluteError(processor.getLayer(0).ampModel.getLength(),
+                                   EnvelopeModel::kDefaultLength, 1.0e-9,
+                                   "A missing Length must fall back to the default, not persist");
+
+        expectWithinAbsoluteError(rawParam(processor, "sub.gain"), 0.55f, 1.0e-6f,
+                                   "Master gain did not come from the preset");
+
+        // The preset described one layer, so the mixer returns to factory rather than keeping the
+        // outgoing patch - otherwise the same file would load differently every session.
+        expectWithinAbsoluteError(rawParam(processor, "layer1.type"),
+                                   (float) (int) ParamIDs::LayerType::sub, 1.0e-6f);
+        expectWithinAbsoluteError(rawParam(processor, "layer1.level"), 1.0f, 1.0e-6f);
+        expectWithinAbsoluteError(rawParam(processor, "layer1.solo"), 0.0f, 1.0e-6f);
+
+        for (int i = 1; i < processor.getNumLayers(); ++i)
+        {
+            const auto where = " on layer " + juce::String(i + 1);
+
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "type")),
+                                       (float) (int) ParamIDs::LayerType::off, 1.0e-6f,
+                                       "A pre-mixer preset must leave later layers Off" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "solo")), 0.0f, 1.0e-6f,
+                                       "A pre-mixer preset must clear solo" + where);
+            expectWithinAbsoluteError(processor.getLayer(i).pitchModel.getNode(0).value, 150.0, 1.0e-9,
+                                       "A pre-mixer preset must reseed later layers" + where);
+            expectWithinAbsoluteError(processor.getLayer(i).ampModel.getLength(),
+                                       EnvelopeModel::kDefaultLength, 1.0e-9,
+                                       "Reseeding must clear the stale Length" + where);
+        }
+
+        // A freshly loaded preset is not a user edit, so there must be nothing to undo back from.
+        expect(! processor.getLayer(0).pitchModel.canUndo(),
+               "Loading a preset left its own edits in the undo history");
+    }
+};
+
+static Phase4StateTest phase4StateTest;
+
+
+
 // ── Test runner entry point ────────────────────────────────────────────────────
 
 int main()

@@ -85,10 +85,6 @@ private:
     // and properties first. Used at construction and when a preset predates that layer.
     void seedLayerWithDefaults(int index);
 
-    // Returns every per-layer mixer parameter to its default, master gain excepted. Needed before
-    // loading a pre-mixer preset; see the call site in setStateInformation for why.
-    void resetLayerParametersToDefaults();
-
     // Shared undo history for every layer's envelope models (Phase 3 §3.4: "Undo
     // / redo, 30 steps"), so a single undo reverts the most recent edit
     // chronologically, regardless of whether it touched pitch or amp.
