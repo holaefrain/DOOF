@@ -943,6 +943,7 @@ public:
         testStripsShowCurrentStateOnConstruction();
         testParameterMovesItsOwnStrip();
         testStripMovesItsOwnParameters();
+        testSoloLightsAndDimsTheOtherStrips();
     }
 
 private:
@@ -1128,6 +1129,75 @@ private:
             level->setValue(1.0, juce::sendNotificationSync);
             solo->setToggleState(false, juce::sendNotificationSync);
         }
+    }
+
+    // §6's GUI check: "solo layers 1 and 3 - only those are audible, the rest visibly dim".
+    // Driven through refreshAppearance() rather than the poll timer, since a unit test has no
+    // message loop running; the timer's only job is to call this, which (a) already proves is
+    // wired by showing the correct appearance the moment a strip is built.
+    void testSoloLightsAndDimsTheOtherStrips()
+    {
+        beginTest("(d) Soloing layers 1 and 3 lights those two and dims the other Sub layers");
+
+        DOOFAudioProcessor processor;
+
+        // All five audible to start, so any dimming that appears is caused by solo alone.
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+            setParamValue(processor, layerId(i, "type"), (float) (int) ParamIDs::LayerType::sub);
+
+        auto strips = makeStrips(processor);
+        auto refreshAll = [&strips] { for (auto& strip : strips) strip->refreshAppearance(); };
+
+        refreshAll();
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            expect(! strips[(size_t) i]->isSoloLit(),
+                   "Layer " + juce::String(i + 1) + " is lit with nothing soloed");
+            expect(! strips[(size_t) i]->isDimmed(),
+                   "Layer " + juce::String(i + 1) + " is dimmed with nothing soloed");
+        }
+
+        setParamValue(processor, layerId(0, "solo"), 1.0f);
+        setParamValue(processor, layerId(2, "solo"), 1.0f);
+        refreshAll();
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const bool soloed = (i == 0 || i == 2);
+            const auto where  = " on layer " + juce::String(i + 1);
+
+            expect(strips[(size_t) i]->isSoloLit() == soloed,
+                   juce::String(soloed ? "A soloed layer is not lit" : "A non-soloed layer is lit") + where);
+            expect(strips[(size_t) i]->isDimmed() == ! soloed,
+                   juce::String(soloed ? "A soloed layer is dimmed"
+                                       : "A layer silenced by another's solo is not dimmed") + where);
+        }
+
+        // Muting a soloed layer silences it, but it is silent for its own reason and keeps its
+        // solo, so it stays lit and must not dim - dimming is reserved for having no local cause.
+        setParamValue(processor, layerId(0, "mute"), 1.0f);
+        refreshAll();
+
+        expect(strips[0]->isSoloLit(), "A soloed layer stopped being lit once it was also muted");
+        expect(! strips[0]->isDimmed(), "A muted layer was dimmed, but its mute is the visible cause");
+
+        // An Off layer is not in the mix, so it neither lights nor dims however solo is set.
+        setParamValue(processor, layerId(4, "type"), (float) (int) ParamIDs::LayerType::off);
+        setParamValue(processor, layerId(4, "solo"), 1.0f);
+        refreshAll();
+
+        expect(! strips[4]->isSoloLit(), "An Off layer lit up when soloed");
+        expect(! strips[4]->isDimmed(), "An Off layer was dimmed");
+
+        // With every solo cleared the whole strip returns to plain, so dimming is genuinely tied
+        // to the solo state and not latched by the first refresh that set it.
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+            setParamValue(processor, layerId(i, "solo"), 0.0f);
+        refreshAll();
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+            expect(! strips[(size_t) i]->isDimmed() && ! strips[(size_t) i]->isSoloLit(),
+                   "Layer " + juce::String(i + 1) + " did not return to plain once solo was cleared");
     }
 };
 

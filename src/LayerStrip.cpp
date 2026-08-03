@@ -45,6 +45,55 @@ LayerStrip::LayerStrip(juce::AudioProcessorValueTreeState& apvts, int layerIndex
     // The `true` includes nested children, which the combo box and slider both have.
     for (auto* child : getChildren())
         child->addMouseListener(this, true);
+
+    for (int i = 0; i < LayerAudibility::kNumLayers; ++i)
+    {
+        auto& cached = flagParams[(size_t) i];
+        cached.type = apvts.getRawParameterValue(ParamIDs::layerType(i));
+        cached.mute = apvts.getRawParameterValue(ParamIDs::layerMute(i));
+        cached.solo = apvts.getRawParameterValue(ParamIDs::layerSolo(i));
+        jassert(cached.type != nullptr && cached.mute != nullptr && cached.solo != nullptr);
+    }
+
+    // Set before the first poll, so the strip opens showing the right state instead of taking up
+    // to a frame to catch up - the same reason the controls are attached before being shown.
+    refreshAppearance();
+
+    // Stopped by Timer's destructor when the editor closes, per §0.5's rule that the editor owns
+    // its timers. A shared timer across all panels is the eventual direction, also per §0.5.
+    startTimerHz(kPollHz);
+}
+
+LayerAudibility::LayerFlags LayerStrip::flagsFor(int layerIndex) const
+{
+    const auto& cached = flagParams[(size_t) layerIndex];
+
+    LayerAudibility::LayerFlags flags;
+    flags.isOff = ((int) cached.type->load() == (int) ParamIDs::LayerType::off);
+    flags.mute  = (cached.mute->load() > 0.5f);
+    flags.solo  = (cached.solo->load() > 0.5f);
+    return flags;
+}
+
+void LayerStrip::refreshAppearance()
+{
+    std::array<LayerAudibility::LayerFlags, LayerAudibility::kNumLayers> all;
+    for (int i = 0; i < LayerAudibility::kNumLayers; ++i)
+        all[(size_t) i] = flagsFor(i);
+
+    const auto updated = LayerAudibility::appearanceFor(all[(size_t) index],
+                                                         LayerAudibility::anyLayerSoloed(all));
+
+    if (updated.lit == appearance.lit && updated.dimmed == appearance.dimmed)
+        return;
+
+    appearance = updated;
+    repaint();
+}
+
+void LayerStrip::timerCallback()
+{
+    refreshAppearance();
 }
 
 void LayerStrip::setSelected(bool shouldBeSelected)
@@ -63,10 +112,27 @@ void LayerStrip::paint(juce::Graphics& g)
     g.setColour(juce::Colours::black.withAlpha(0.25f));
     g.fillRoundedRectangle(bounds, 3.0f);
 
-    // Selection is a border, not a fill, so 5b's dimming can work on alpha without the two
-    // states reading as one another.
+    // Soloed layers light up (§3.3). Behind the children, so it reads as the cell glowing rather
+    // than as a wash over the controls.
+    if (appearance.lit)
+    {
+        g.setColour(juce::Colours::yellow.withAlpha(0.22f));
+        g.fillRoundedRectangle(bounds, 3.0f);
+    }
+
+    // Selection is a border, not a fill, so it stays legible under the dim wash and cannot be
+    // mistaken for the lit state.
     g.setColour(juce::Colours::white.withAlpha(selected ? 1.0f : 0.25f));
     g.drawRoundedRectangle(bounds, 3.0f, selected ? 2.0f : 1.0f);
+}
+
+void LayerStrip::paintOverChildren(juce::Graphics& g)
+{
+    if (! appearance.dimmed)
+        return;
+
+    g.setColour(juce::Colours::black.withAlpha(0.5f));
+    g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 3.0f);
 }
 
 void LayerStrip::resized()

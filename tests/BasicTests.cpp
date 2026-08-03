@@ -882,6 +882,8 @@ public:
         testAllSixteenCombinations();
         testAnyLayerSoloed();
         testFlagsOverloadAgrees();
+        testAppearanceOverAllCombinations();
+        testAppearanceIsSelfConsistent();
     }
 
 private:
@@ -994,6 +996,87 @@ private:
             expect(LayerAudibility::isAudible(flags, anySoloed)
                      == LayerAudibility::isAudible(flags.isOff, flags.mute, flags.solo, anySoloed),
                    "Overload disagreed at combination index " + juce::String(i));
+        }
+    }
+
+    // (d) The GUI appearance rule, over all 16 combinations, written out rather than derived.
+    // A table computed from appearanceFor's own logic would only restate the implementation.
+    void testAppearanceOverAllCombinations()
+    {
+        beginTest("(d) All 16 combinations produce the section 3.3 lit/dimmed appearance");
+
+        struct Row { bool isOff, mute, solo, anySoloed, lit, dimmed; };
+
+        // dimmed is reserved for a layer with no local reason to be silent: muted and Off layers
+        // already show why through their own controls, so they never dim.
+        static constexpr Row rows[] =
+        {
+            { false, false, false, false, false, false }, // audible, nothing soloed
+            { false, false, false, true,  false, true  }, // the only dimmed case there is
+            { false, false, true,  false, true,  false }, // soloed, nothing else soloed
+            { false, false, true,  true,  true,  false }, // soloed among others
+            { false, true,  false, false, false, false }, // muted: silent, but not dimmed
+            { false, true,  false, true,  false, false },
+            { false, true,  true,  false, true,  false }, // solo+mute: silent, still reads as soloed
+            { false, true,  true,  true,  true,  false },
+
+            { true,  false, false, false, false, false }, // Off never lights and never dims
+            { true,  false, false, true,  false, false },
+            { true,  false, true,  false, false, false }, // soloed but Off: not lit, see appearanceFor
+            { true,  false, true,  true,  false, false },
+            { true,  true,  false, false, false, false },
+            { true,  true,  false, true,  false, false },
+            { true,  true,  true,  false, false, false },
+            { true,  true,  true,  true,  false, false },
+        };
+
+        static_assert(sizeof(rows) / sizeof(rows[0]) == 16,
+                      "The appearance table must cover all 2^4 combinations of the four inputs");
+
+        for (const auto& row : rows)
+        {
+            LayerAudibility::LayerFlags flags;
+            flags.isOff = row.isOff;
+            flags.mute  = row.mute;
+            flags.solo  = row.solo;
+
+            const auto actual = LayerAudibility::appearanceFor(flags, row.anySoloed);
+            const auto where = " at (isOff=" + juce::String((int) row.isOff)
+                                 + ", mute="  + juce::String((int) row.mute)
+                                 + ", solo="  + juce::String((int) row.solo)
+                                 + ", anySoloed=" + juce::String((int) row.anySoloed) + ")";
+
+            expect(actual.lit == row.lit,
+                   "lit was " + juce::String((int) actual.lit) + ", expected "
+                     + juce::String((int) row.lit) + where);
+            expect(actual.dimmed == row.dimmed,
+                   "dimmed was " + juce::String((int) actual.dimmed) + ", expected "
+                     + juce::String((int) row.dimmed) + where);
+        }
+    }
+
+    // (e) A layer is never both lit and dimmed, and a dimmed layer is always genuinely silent.
+    // Cheap to state, and it pins the two fields to each other rather than only to the table.
+    void testAppearanceIsSelfConsistent()
+    {
+        beginTest("(e) Appearance never claims a layer is both soloed and silenced by others");
+
+        for (int i = 0; i < 16; ++i)
+        {
+            LayerAudibility::LayerFlags flags;
+            flags.isOff = (i & 8) != 0;
+            flags.mute  = (i & 4) != 0;
+            flags.solo  = (i & 2) != 0;
+            const bool anySoloed = (i & 1) != 0;
+
+            const auto appearance = LayerAudibility::appearanceFor(flags, anySoloed);
+
+            expect(! (appearance.lit && appearance.dimmed),
+                   "Both lit and dimmed at combination index " + juce::String(i));
+
+            if (appearance.dimmed)
+                expect(! LayerAudibility::isAudible(flags, anySoloed),
+                       "A dimmed layer is still audible at combination index " + juce::String(i));
         }
     }
 };

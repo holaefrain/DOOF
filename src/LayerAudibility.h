@@ -46,4 +46,21 @@ namespace LayerAudibility
 
     // Convenience overload for callers already holding a LayerFlags.
     bool isAudible(const LayerFlags& flags, bool anySoloed);
+
+    // How one layer should look, per §3.3's "GUI mirrors engine: soloed layers light up; layers
+    // silenced *because* of someone else's solo are dimmed."
+    struct Appearance
+    {
+        bool lit    = false; // this layer is one of the soloed ones
+        bool dimmed = false; // audible on its own, but silenced by another layer's solo
+    };
+
+    // Lives here rather than in the GUI so the displayed state is derived from the same rule the
+    // mixer applies, and the two cannot drift apart. Both fields are defined in terms of
+    // isAudible() above for exactly that reason.
+    //
+    // Note "dimmed" is narrower than "silent": a muted or Off layer is silent too, but it already
+    // says so through its own controls, and §3.3 reserves dimming for the case with no local
+    // cause. So dimmed means "silent now, but would be audible if nothing were soloed".
+    Appearance appearanceFor(const LayerFlags& flags, bool anySoloed);
 }
