@@ -7,8 +7,8 @@
 EnvelopeCanvas::EnvelopeCanvas(EnvelopeModel& pitchModelIn, juce::Range<double> pitchRangeIn,
                                EnvelopeModel& ampModelIn,   juce::Range<double> ampRangeIn,
                                double initialViewDuration, juce::AudioProcessor& processorForPlayHead)
-    : pitchModel(pitchModelIn), pitchRange(pitchRangeIn),
-      ampModel(ampModelIn),     ampRange(ampRangeIn),
+    : pitchModel(&pitchModelIn), pitchRange(pitchRangeIn),
+      ampModel(&ampModelIn),     ampRange(ampRangeIn),
       viewDuration(initialViewDuration), processor(processorForPlayHead)
 {
     // Opaque + self-drawn background (paint() below) means a repaint of this
@@ -191,10 +191,10 @@ void EnvelopeCanvas::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xff1a1a1a));
 
     drawBeatGrid(g);
-    drawEnvelope(g, pitchModel, pitchRange, juce::Colours::cyan,   pitchLogScale);
-    drawEnvelope(g, ampModel,   ampRange,   juce::Colours::orange, false); // amp always linear
-    drawLengthHandle(g, pitchModel, juce::Colours::cyan);
-    drawLengthHandle(g, ampModel,   juce::Colours::orange);
+    drawEnvelope(g, *pitchModel, pitchRange, juce::Colours::cyan,   pitchLogScale);
+    drawEnvelope(g, *ampModel,   ampRange,   juce::Colours::orange, false); // amp always linear
+    drawLengthHandle(g, *pitchModel, juce::Colours::cyan);
+    drawLengthHandle(g, *ampModel,   juce::Colours::orange);
     drawDragReadout(g);
 }
 
@@ -220,8 +220,8 @@ EnvelopeCanvas::NodeHit EnvelopeCanvas::findNodeAt(juce::Point<float> pos) const
         }
     };
 
-    check(pitchModel, pitchRange, pitchLogScale, true);
-    check(ampModel,   ampRange,   false,         false);
+    check(*pitchModel, pitchRange, pitchLogScale, true);
+    check(*ampModel,   ampRange,   false,         false);
 
     return best;
 }
@@ -234,11 +234,11 @@ EnvelopeCanvas::LengthHandleHit EnvelopeCanvas::findLengthHandleAt(juce::Point<f
     if (pos.y < (float) getHeight() - kHitBandHeight)
         return {};
 
-    const float pitchX = timeToX(pitchModel.getLength());
+    const float pitchX = timeToX(pitchModel->getLength());
     if (std::abs(pos.x - pitchX) <= kHitHalfWidth)
         return { true, true };
 
-    const float ampX = timeToX(ampModel.getLength());
+    const float ampX = timeToX(ampModel->getLength());
     if (std::abs(pos.x - ampX) <= kHitHalfWidth)
         return { false, true };
 
@@ -247,14 +247,14 @@ EnvelopeCanvas::LengthHandleHit EnvelopeCanvas::findLengthHandleAt(juce::Point<f
 
 void EnvelopeCanvas::deleteNodeAt(NodeHit hit)
 {
-    auto& model = hit.isPitch ? pitchModel : ampModel;
+    auto& model = modelFor(hit.isPitch);
     model.deleteNode(hit.index);
     repaint();
 }
 
 void EnvelopeCanvas::resetCurve(bool isPitch)
 {
-    auto& model = isPitch ? pitchModel : ampModel;
+    auto& model = modelFor(isPitch);
 
     model.beginGesture();
     while (model.getNumNodes() > 0)
@@ -271,7 +271,7 @@ void EnvelopeCanvas::resetCurve(bool isPitch)
 
 void EnvelopeCanvas::copyCurve(bool isPitch) const
 {
-    const auto& model = isPitch ? pitchModel : ampModel;
+    const auto& model = modelFor(isPitch);
     const std::unique_ptr<juce::XmlElement> xml(model.getValueTree().createXml());
     juce::SystemClipboard::copyTextToClipboard(xml->toString());
 }
@@ -286,7 +286,7 @@ void EnvelopeCanvas::pasteCurve(bool isPitch)
     if (! tree.hasType(EnvelopeIDs::envelopeType))
         return;
 
-    auto& model = isPitch ? pitchModel : ampModel;
+    auto& model = modelFor(isPitch);
 
     model.beginGesture();
     while (model.getNumNodes() > 0)
@@ -377,8 +377,8 @@ EnvelopeCanvas::CurveHit EnvelopeCanvas::findCurveAt(juce::Point<float> pos) con
         }
     };
 
-    check(pitchModel, pitchRange, pitchLogScale, true);
-    check(ampModel,   ampRange,   false,         false);
+    check(*pitchModel, pitchRange, pitchLogScale, true);
+    check(*ampModel,   ampRange,   false,         false);
 
     return best;
 }
@@ -398,7 +398,7 @@ void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
         draggingPitch    = nodeHit.isPitch;
         draggedNodeIndex = nodeHit.index;
 
-        auto& model = draggingPitch ? pitchModel : ampModel;
+        auto& model = modelFor(draggingPitch);
         model.beginGesture();
         return;
     }
@@ -409,7 +409,7 @@ void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
         draggingLength      = true;
         lengthDragIsPitch   = lengthHit.isPitch;
 
-        auto& model = lengthDragIsPitch ? pitchModel : ampModel;
+        auto& model = modelFor(lengthDragIsPitch);
         model.beginGesture();
         return;
     }
@@ -428,7 +428,7 @@ void EnvelopeCanvas::mouseDown(const juce::MouseEvent& e)
     reshapeSegmentIndex = curveHit.segmentIndex;
     reshapeT             = curveHit.t;
 
-    auto& model = reshapingPitch ? pitchModel : ampModel;
+    auto& model = modelFor(reshapingPitch);
     const auto a = model.getNode(reshapeSegmentIndex);
     const auto b = model.getNode(reshapeSegmentIndex + 1);
     reshapeOrigCpOutTime  = a.cpOutTime;
@@ -453,7 +453,7 @@ void EnvelopeCanvas::mouseDoubleClick(const juce::MouseEvent& e)
         return;
     }
 
-    auto& model        = (activeCurve == ActiveCurve::pitch) ? pitchModel : ampModel;
+    auto& model        = modelFor(activeCurve == ActiveCurve::pitch);
     auto& valueRange    = (activeCurve == ActiveCurve::pitch) ? pitchRange : ampRange;
     const bool useLog   = (activeCurve == ActiveCurve::pitch) && pitchLogScale;
 
@@ -469,7 +469,7 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
 {
     if (draggedNodeIndex != -1)
     {
-        auto& model      = draggingPitch ? pitchModel : ampModel;
+        auto& model      = modelFor(draggingPitch);
         auto& valueRange  = draggingPitch ? pitchRange : ampRange;
         const bool useLog = draggingPitch && pitchLogScale;
 
@@ -495,7 +495,7 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
 
     if (reshapeSegmentIndex != -1)
     {
-        auto& model       = reshapingPitch ? pitchModel : ampModel;
+        auto& model       = modelFor(reshapingPitch);
         auto& valueRange   = reshapingPitch ? pitchRange : ampRange;
         const bool useLog  = reshapingPitch && pitchLogScale;
 
@@ -553,7 +553,7 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
 
     if (draggingLength)
     {
-        auto& model = lengthDragIsPitch ? pitchModel : ampModel;
+        auto& model = modelFor(lengthDragIsPitch);
         const double newLength = juce::jlimit(kMinLength, EnvelopeEvaluator::kTableDomainSeconds, xToTime(e.position.x));
         model.setLength(newLength);
 
@@ -569,7 +569,7 @@ void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
 {
     if (draggedNodeIndex != -1)
     {
-        auto& model = draggingPitch ? pitchModel : ampModel;
+        auto& model = modelFor(draggingPitch);
         model.endGesture();
         draggedNodeIndex = -1;
         repaint();
@@ -578,7 +578,7 @@ void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
 
     if (reshapeSegmentIndex != -1)
     {
-        auto& model = reshapingPitch ? pitchModel : ampModel;
+        auto& model = modelFor(reshapingPitch);
         model.endGesture();
         reshapeSegmentIndex = -1;
         repaint();
@@ -593,7 +593,7 @@ void EnvelopeCanvas::mouseUp(const juce::MouseEvent&)
 
     if (draggingLength)
     {
-        auto& model = lengthDragIsPitch ? pitchModel : ampModel;
+        auto& model = modelFor(lengthDragIsPitch);
         model.endGesture();
         draggingLength = false;
         return;

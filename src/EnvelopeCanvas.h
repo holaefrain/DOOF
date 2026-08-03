@@ -72,6 +72,14 @@ public:
     std::function<void()> onLengthChanged;
 
 private:
+    // The model for one curve. Almost every interaction here already knows which curve it is
+    // acting on as a bool, so this replaces the pitch-or-amp ternary that was otherwise repeated
+    // at fourteen call sites - one place to be wrong instead of fourteen. The const overload
+    // exists because pointer members, unlike reference members, do not hand out a const referent
+    // inside a const method.
+    EnvelopeModel&       modelFor(bool isPitch)       { return isPitch ? *pitchModel : *ampModel; }
+    const EnvelopeModel& modelFor(bool isPitch) const { return isPitch ? *pitchModel : *ampModel; }
+
     // Points sampled per Bezier segment when drawing a curve — fine enough
     // that individual line segments aren't visible at typical canvas sizes.
     static constexpr int kSamplesPerSegment = 32;
@@ -184,9 +192,12 @@ private:
     // Fraction of the current view duration zoomed per wheel notch.
     static constexpr double kZoomStep = 0.15;
 
-    EnvelopeModel& pitchModel;
+    // Pointers rather than references so a later step can point the canvas at a different layer's
+    // models without rebuilding the component. Never null: set at construction and only ever
+    // reseated to another valid pair.
+    EnvelopeModel* pitchModel;
     juce::Range<double> pitchRange;
-    EnvelopeModel& ampModel;
+    EnvelopeModel* ampModel;
     juce::Range<double> ampRange;
 
     // The current view window: [viewStartTime, viewStartTime + viewDuration]
