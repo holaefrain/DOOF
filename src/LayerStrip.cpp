@@ -24,6 +24,15 @@ LayerStrip::LayerStrip(juce::AudioProcessorValueTreeState& apvts, int layerIndex
     // TextButton is momentary until told otherwise; ButtonAttachment drives getToggleState().
     muteButton.setClickingTogglesState(true);
     soloButton.setClickingTogglesState(true);
+
+    // Explicit on-colours because the default scheme's on and off states are near-identical at
+    // this size, which left mute with no visible indication at all - the solo glow at least hints
+    // at solo, but a muted layer looked exactly like an unmuted one. Red/amber is the usual mixer
+    // reading. The dark text is for contrast against these two specific fills.
+    muteButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffcc3322));
+    soloButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffe0b020));
+    muteButton.setColour(juce::TextButton::textColourOnId,   juce::Colours::white);
+    soloButton.setColour(juce::TextButton::textColourOnId,   juce::Colours::black);
     muteButton.setComponentID(muteButtonID);
     soloButton.setComponentID(soloButtonID);
     addAndMakeVisible(muteButton);

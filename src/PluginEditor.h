@@ -1,6 +1,9 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "EnvelopeCanvas.h"
+#include "LayerStrip.h"
+#include <array>
+#include <memory>
 
 // DOOFAudioProcessorEditor — the plugin's GUI root window.
 // Owns all visible panels and controls. Created and destroyed by the host
@@ -38,9 +41,22 @@ private:
     // own edit is committed (to reflect any clamping the model applied).
     void refreshLengthLabels();
 
+    // Marks one layer as selected and clears the other four, so exactly one is ever selected.
+    // The selection currently only changes which strip is outlined; retargeting the canvas and
+    // the contextual panel to that layer is Step 6.
+    void setSelectedLayer(int layerIndex);
+
     // Back-reference to the processor; used to access parameters and engine state.
     // Guaranteed valid for the lifetime of this editor (processor outlives editor).
     DOOFAudioProcessor& audioProcessor;
+
+    // The horizontal layer selector (§4.3), one cell per layer. Held by unique_ptr because
+    // LayerStrip needs the APVTS at construction and so is not default-constructible.
+    std::array<std::unique_ptr<LayerStrip>, LayerAudibility::kNumLayers> layerStrips;
+
+    // Which layer the strip currently has selected. Layer 1 to start, matching the default patch
+    // where it is the only audible layer.
+    int selectedLayer = 0;
 
     // The central canvas (§3.4): pitch + amp curves overlaid on one time axis.
     // Declared after audioProcessor since its constructor reads model

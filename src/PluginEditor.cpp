@@ -115,6 +115,19 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
             });
     };
 
+    // Built here rather than in the initialiser list so the callback wiring sits beside the
+    // construction. Each strip drives its own layer's parameters through its own attachments;
+    // the editor only arbitrates which one is selected, since no strip can know about the others.
+    for (int i = 0; i < DOOFAudioProcessor::getNumLayers(); ++i)
+    {
+        auto strip = std::make_unique<LayerStrip>(audioProcessor.apvts, i);
+        strip->onLayerSelected = [this, i] { setSelectedLayer(i); };
+        addAndMakeVisible(*strip);
+        layerStrips[(size_t) i] = std::move(strip);
+    }
+
+    layerStrips[(size_t) selectedLayer]->setSelected(true);
+
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
@@ -172,7 +185,31 @@ void DOOFAudioProcessorEditor::resized()
     savePresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
     loadPresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
 
+    // The layer selector (§4.3), above the canvas and spanning the full width. Cells are divided
+    // by remaining width rather than a fixed size, so the row still fills a resized window; the
+    // integer division leaves at most four pixels unused at the right, which the last cell takes.
+    auto layerBar = bounds.removeFromTop(80);
+    const int cellWidth = layerBar.getWidth() / (int) layerStrips.size();
+
+    for (size_t i = 0; i < layerStrips.size(); ++i)
+    {
+        const bool isLast = (i + 1 == layerStrips.size());
+        layerStrips[i]->setBounds(isLast ? layerBar : layerBar.removeFromLeft(cellWidth));
+    }
+
     envelopeCanvas.setBounds(bounds);
+}
+
+void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)
+{
+    jassert(juce::isPositiveAndBelow(layerIndex, DOOFAudioProcessor::getNumLayers()));
+
+    selectedLayer = layerIndex;
+
+    // Every strip is told, not just the two that changed: setSelected() already no-ops when the
+    // value is unchanged, so this cannot leave two outlined if selection ever moves another way.
+    for (int i = 0; i < DOOFAudioProcessor::getNumLayers(); ++i)
+        layerStrips[(size_t) i]->setSelected(i == layerIndex);
 }
 
 bool DOOFAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
