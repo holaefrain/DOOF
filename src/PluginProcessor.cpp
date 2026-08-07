@@ -268,9 +268,14 @@ bool DOOFAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) cons
 //
 // Processing order:
 //   1. Resolve each layer's target gain for this block (type, level, mute/solo).
-//   2. Consume all MIDI events (block-accurate; sample-accurate in a later phase).
-//   3. For each sample: tick every layer's voice, sum them through their smoothed
-//      gains, apply master gain, apply DC blocker, write to L+R.
+//   2. Walk the MIDI buffer in order, rendering up to each event's sample position
+//      before applying it, then render whatever is left after the last event.
+//
+// MIDI dispatch is sample-accurate: an event at position N is applied after exactly N samples of
+// this block have been rendered, not at the start of the block. Until Phase 5 every note-on in a
+// block fired at sample 0, which on a 512-sample buffer is up to 11 ms early — inaudible on the
+// sub's slow attack, but plainly audible timing slop on a click transient, and enough to make
+// §6's "assert the click onset is sample-aligned to note-on" unpassable.
 //
 // Real-time safety guarantee: no allocations, no locks, no file/network I/O in this function
 // or any function it calls.  Verify with AddressSanitizer's alloc hooks when running headless.
@@ -298,33 +303,64 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         layerGain[(size_t) i].setTargetValue(getTargetGain(i, anySoloed));
     }
 
-    // Step 2 — handle MIDI events.
-    // Note-off is intentionally ignored: the amp envelope handles the voice decay.
+    // Step 2 — render the block, split at every MIDI event.
     //
-    // Note-ons go to every layer's voice, including Off ones. A layer switched
-    // on part-way through a note then plays from the right point in the
-    // envelope rather than restarting, and switching one on between notes costs
-    // nothing since its voice is already idle.
+    // The master gain is loaded once for the whole block rather than per sub-range, so splitting
+    // the loop can't change how often it is sampled.
+    const float gain = masterGainParam->load();
+    const int numSamples = buffer.getNumSamples();
+
+    // How much of the block has been written so far; also the start of the next sub-range.
+    int rendered = 0;
+
+    // Note-off is intentionally ignored: the amp envelope handles the voice decay.
     for (const auto metadata : midiMessages)
     {
         const auto msg = metadata.getMessage();
-        if (msg.isNoteOn())
-            for (int i = 0; i < getNumLayers(); ++i)
-                getLayer(i).voice.noteOn(msg.getNoteNumber());
+        if (! msg.isNoteOn())
+            continue;
+
+        // Clamped rather than trusted. MidiBuffer iterates in ascending sample position and the
+        // host should keep events inside the block, but an out-of-range or out-of-order position
+        // would otherwise rewind the cursor and re-render samples already written — advancing the
+        // voices twice over the same span.
+        const int eventPos = juce::jlimit(rendered, numSamples, metadata.samplePosition);
+
+        renderRange(buffer, rendered, eventPos - rendered, gain);
+        rendered = eventPos;
+
+        // Note-ons go to every layer's voice, including Off ones. A layer switched
+        // on part-way through a note then plays from the right point in the
+        // envelope rather than restarting, and switching one on between notes costs
+        // nothing since its voice is already idle.
+        for (int i = 0; i < getNumLayers(); ++i)
+            getLayer(i).voice.noteOn(msg.getNoteNumber());
     }
 
-    // Step 3 — render and mix.
-    //
-    // Layers are summed straight, with no division by the number of active
-    // layers: normalising would change the sound of every other layer whenever
-    // one was enabled. Five layers at unity can therefore exceed full scale,
-    // which is expected — taming that is the Phase 9 master limiter's job, and
-    // nothing here clamps or wraps.
-    const float gain = masterGainParam->load();
+    // Everything after the last event — the whole block when there was no note-on at all.
+    renderRange(buffer, rendered, numSamples - rendered, gain);
+}
+
+// Renders and mixes one contiguous span of the block, from startSample for numSamples. Called once
+// per gap between MIDI events, so a zero-length span (two events at the same position, or an event
+// at sample 0) is a legitimate no-op rather than an error.
+//
+// Layers are summed straight, with no division by the number of active layers: normalising would
+// change the sound of every other layer whenever one was enabled. Five layers at unity can
+// therefore exceed full scale, which is expected — taming that is the Phase 9 master limiter's
+// job, and nothing here clamps or wraps.
+//
+// Audio-thread only, and bound by the same real-time rules as processBlock itself.
+void DOOFAudioProcessor::renderRange(juce::AudioBuffer<float>& buffer, int startSample,
+                                     int numSamples, float gain)
+{
+    jassert(startSample >= 0 && numSamples >= 0
+             && startSample + numSamples <= buffer.getNumSamples());
+
     auto* leftCh  = buffer.getWritePointer(0);
     auto* rightCh = buffer.getWritePointer(1);
 
-    for (int i = 0; i < buffer.getNumSamples(); ++i)
+    for (int i = startSample; i < startSample + numSamples; ++i)
     {
         // Every layer is ticked every sample, even silent ones, and never
         // skipped. Skipping would freeze that layer's envelope time, so

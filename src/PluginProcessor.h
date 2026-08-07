@@ -31,6 +31,8 @@ public:
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
     // Main audio callback — processes one block of audio and MIDI each cycle.
+    // MIDI dispatch is sample-accurate: the block is rendered in spans between events, so a
+    // note-on at sample N sounds at sample N rather than at the start of the block.
     // Must be real-time safe: no allocations, no locks, no I/O.
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
@@ -83,6 +85,12 @@ private:
     // Builds the parameter layout passed to the APVTS constructor.
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    // Renders and mixes one contiguous span of the current block: every layer's voice ticked and
+    // summed through its smoothed gain, then master gain and the DC blocker, written to L+R.
+    // processBlock calls this once per gap between MIDI events, which is what makes note-on
+    // dispatch sample-accurate. A zero-length span is a valid no-op.
+    void renderRange(juce::AudioBuffer<float>& buffer, int startSample, int numSamples, float gain);
 
     // Reads the curve-tagged ENVELOPE children of `parent` into layer `index`'s two models.
     // Shared by both load paths, which differ only in which tree the envelopes hang off.
