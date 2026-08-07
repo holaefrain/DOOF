@@ -45,6 +45,16 @@ float ClickVoice::processSample()
         if (! slot.running)
             continue;
 
+        // Tested before rendering rather than after. A hit's amplitude at decaySeconds is exactly
+        // kSilenceLevel — still non-zero — so rendering the sample and only then noticing would
+        // put one audible sample beyond the stated duration. Checking first makes the decay
+        // control an exact duration: the first silent sample is ceil(decaySeconds * sampleRate).
+        if (slot.gen.isFinished())
+        {
+            slot.running = false;
+            continue;
+        }
+
         double sample = (double) slot.gen.render();
 
         if (slot.fading)
@@ -58,11 +68,6 @@ float ClickVoice::processSample()
             if (slot.fadeTime >= kFadeOutSeconds)
                 slot.running = false;
         }
-
-        // Checked after the ramp rather than instead of it: a hit can reach the end of its decay
-        // while still fading, and either condition frees the slot.
-        if (slot.gen.isFinished())
-            slot.running = false;
 
         out += sample;
     }
@@ -113,7 +118,7 @@ void ClickVoice::Generator::start(Type typeToUse, float toneNormalised, double d
 {
     type       = typeToUse;
     sampleRate = sr;
-    envTime    = 0.0;
+    samplesElapsed = 0;
     lpState    = 0.0;
     bandState  = 0.0;
     impulseSpent = false;
@@ -131,11 +136,15 @@ void ClickVoice::Generator::start(Type typeToUse, float toneNormalised, double d
 
     // Clamped rather than trusted: a zero decay would divide by zero below, and a huge one would
     // leave the slot rendering long past anything a click should.
-    decaySeconds = juce::jlimit(kMinDecaySeconds, kMaxDecaySeconds, decay);
+    const double clampedDecay = juce::jlimit(kMinDecaySeconds, kMaxDecaySeconds, decay);
 
-    // amp = exp(-envTime * decayK), chosen so amp is exactly kSilenceLevel at decaySeconds. That
+    // amp = exp(-elapsed * decayK), chosen so amp is exactly kSilenceLevel at clampedDecay. That
     // makes the control a real duration instead of a time constant with an open-ended tail.
-    decayK = -std::log(kSilenceLevel) / decaySeconds;
+    decayK = -std::log(kSilenceLevel) / clampedDecay;
+
+    // Rounded up, so a duration that falls between two samples still renders the one just before
+    // it rather than stopping early.
+    decaySamples = (int) std::ceil(clampedDecay * sampleRate);
 
     const double tone = (double) juce::jlimit(0.0f, 1.0f, toneNormalised);
 
@@ -179,7 +188,10 @@ void ClickVoice::Generator::start(Type typeToUse, float toneNormalised, double d
 // One sample of this hit: a source shaped by the tone filter, times the exponential fall.
 float ClickVoice::Generator::render()
 {
-    const double amp = std::exp(-envTime * decayK);
+    // Derived from the sample count rather than accumulated, so it cannot drift away from the
+    // duration isFinished() is measuring against.
+    const double elapsedSeconds = (double) samplesElapsed / sampleRate;
+    const double amp = std::exp(-elapsedSeconds * decayK);
 
     double source = 0.0;
 
@@ -235,7 +247,7 @@ float ClickVoice::Generator::render()
         }
     }
 
-    envTime += 1.0 / sampleRate;
+    ++samplesElapsed;
 
     return (float) (source * levelScale * amp);
 }

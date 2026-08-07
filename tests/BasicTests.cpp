@@ -1,5 +1,6 @@
 #include <juce_core/juce_core.h>
 #include "SubVoice.h"
+#include "ClickVoice.h"
 #include "EnvelopeModel.h"
 #include "EnvelopeEvaluator.h"
 #include "EnvelopePublisher.h"
@@ -7,6 +8,7 @@
 #include "LayerAudibility.h"
 
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -1082,6 +1084,330 @@ private:
 };
 
 static LayerAudibilityTest layerAudibilityTest;
+
+// ── Phase 5 ───────────────────────────────────────────────────────────────────
+
+// Phase5ClickVoiceTest — the transient half of a kick, per §6 Phase 5.
+//   (a) Onset lands on the trigger sample itself, for all four types.
+//   (b) The decay control is a real duration: silence by then, sound before it, at any sample rate.
+//   (c) Two identical triggers render bit-identically.
+//   (d) A retrigger adds no discontinuity beyond a fresh onset's own.
+//   (e) Raising tone measurably raises high-frequency content.
+//
+// Lives in the lean DOOFTests target rather than DOOFIntegrationTests, which is the whole reason
+// ClickVoice.h is restricted to juce_core — these are the tests worth iterating on quickly while
+// tuning the click's sound in 6a.
+class Phase5ClickVoiceTest : public juce::UnitTest
+{
+public:
+    Phase5ClickVoiceTest() : juce::UnitTest("Phase5ClickVoice") {}
+
+    void runTest() override
+    {
+        testOnsetIsImmediate();
+        testDecayIsARealDuration();
+        testIdenticalTriggersAreIdentical();
+        testRetriggerAddsNoDiscontinuity();
+        testToneRaisesHighFrequencyContent();
+    }
+
+private:
+    static constexpr double kSampleRate = 44100.0;
+
+    // Every type, so no check below can silently cover only the one that happens to be first.
+    static constexpr ClickVoice::Type kAllTypes[] = {
+        ClickVoice::Type::tick, ClickVoice::Type::noise,
+        ClickVoice::Type::snap, ClickVoice::Type::thump
+    };
+
+    // Readable names for failure messages; indexed by the enum's own numbering, which Step 3a
+    // freezes into the parameter's choice list.
+    static juce::String nameOf(ClickVoice::Type type)
+    {
+        switch (type)
+        {
+            case ClickVoice::Type::tick:  return "tick";
+            case ClickVoice::Type::noise: return "noise";
+            case ClickVoice::Type::snap:  return "snap";
+            case ClickVoice::Type::thump: return "thump";
+        }
+        return "?";
+    }
+
+    // Renders one hit from a freshly prepared voice. Triggered at sample 0, since the voice's own
+    // onset timing is what is under test here — placing it inside a block is the processor's job
+    // and is covered by Phase5MidiDispatchTest in the integration target.
+    static std::vector<float> render(ClickVoice::Type type, float tone, double decaySeconds,
+                                     int numSamples, double sr = kSampleRate)
+    {
+        ClickVoice voice;
+        voice.prepare(sr);
+        voice.setType(type);
+        voice.setTone(tone);
+        voice.setDecaySeconds(decaySeconds);
+        voice.noteOn(60);
+
+        std::vector<float> out((std::size_t) numSamples, 0.0f);
+        for (int i = 0; i < numSamples; ++i)
+            out[(std::size_t) i] = voice.processSample();
+
+        return out;
+    }
+
+    // Largest jump between consecutive samples over buf[start, end), measured against the sample
+    // before start so the very first transition is included rather than skipped.
+    static float maxJump(const std::vector<float>& buf, int start, int end)
+    {
+        float largest = 0.0f;
+        for (int i = start; i < end; ++i)
+        {
+            const float prev = (i > 0) ? buf[(std::size_t) i - 1] : 0.0f;
+            largest = std::max(largest, std::abs(buf[(std::size_t) i] - prev));
+        }
+        return largest;
+    }
+
+    // (a) A click's energy must arrive on the trigger sample, not one or more samples later.
+    // Sample-accurate dispatch (Step 1) puts the note-on at the right sample; this is the other
+    // half of that promise — that the voice actually sounds on the sample it was given.
+    void testOnsetIsImmediate()
+    {
+        beginTest("(a) Every click type sounds on the sample it is triggered");
+
+        for (const auto type : kAllTypes)
+        {
+            const auto hit = render(type, 0.5f, 0.008, 64);
+
+            expect(hit[0] != 0.0f,
+                   nameOf(type) + " is silent on its own trigger sample, so its onset is late");
+        }
+    }
+
+    // (b) decay is documented as a duration, not a time constant, so both halves are asserted:
+    // there is still sound shortly before it and exact silence from it onward. Checked at two
+    // sample rates, since the fall is derived from the rate and a missing division would only
+    // show up away from 44.1 kHz.
+    void testDecayIsARealDuration()
+    {
+        beginTest("(b) The decay control is a real duration at any sample rate");
+
+        for (const double sr : { 44100.0, 96000.0 })
+        {
+            for (const double decay : { 0.002, 0.020 })
+            {
+                // The first sample whose timestamp reaches decaySeconds — ceil, not truncate,
+                // since a sample at index floor(decay * sr) can still be a hair before the end.
+                const int decaySample = (int) std::ceil(decay * sr);
+                const auto hit = render(ClickVoice::Type::noise, 0.5f, decay,
+                                        decaySample + (int) (sr * 0.01), sr);
+
+                // Just before the end: the hit must not have stopped early.
+                bool soundedLate = false;
+                for (int i = decaySample - (int) (sr * 0.0005); i < decaySample; ++i)
+                    if (hit[(std::size_t) i] != 0.0f)
+                        soundedLate = true;
+
+                expect(soundedLate,
+                       "A " + juce::String(decay * 1000.0, 1) + " ms click at "
+                           + juce::String(sr, 0) + " Hz is already silent before its decay ends");
+
+                // From the end onward: exact silence, not merely quiet.
+                int rangAfter = -1;
+                for (int i = decaySample; i < (int) hit.size(); ++i)
+                    if (hit[(std::size_t) i] != 0.0f)
+                    {
+                        rangAfter = i;
+                        break;
+                    }
+
+                expect(rangAfter < 0,
+                       "A " + juce::String(decay * 1000.0, 1) + " ms click at "
+                           + juce::String(sr, 0) + " Hz was still sounding at sample "
+                           + juce::String(rangAfter) + ", past its decay");
+            }
+        }
+    }
+
+    // (c) The noise generator is re-seeded to a fixed value on every hit precisely so this holds.
+    // A real click sample is identical every trigger, and without this property none of the
+    // engine's null tests could survive a click layer being switched on.
+    void testIdenticalTriggersAreIdentical()
+    {
+        beginTest("(c) Two identical triggers render bit-identically");
+
+        for (const auto type : kAllTypes)
+        {
+            const auto first  = render(type, 0.5f, 0.008, 1024);
+            const auto second = render(type, 0.5f, 0.008, 1024);
+
+            int diverged = -1;
+            for (std::size_t i = 0; i < first.size(); ++i)
+                if (std::memcmp(&first[i], &second[i], sizeof(float)) != 0)
+                {
+                    diverged = (int) i;
+                    break;
+                }
+
+            expect(diverged < 0,
+                   nameOf(type) + " renders differently on a second identical trigger, first at "
+                       + "sample " + juce::String(diverged));
+        }
+    }
+
+    // (d) Deliberately NOT the sub's "no jump above 0.1" (Phase1VoiceTest (d)). That threshold
+    // works for SubVoice because its new body starts at sin(0) * 0 = 0, so a retrigger really is
+    // continuous. A click is the opposite: its onset is a designed discontinuity — thump's is
+    // exactly 1.0 — so a fixed threshold would either fail on every type or have to be set so
+    // loose it proved nothing.
+    //
+    // Nor is it enough to compare the largest jump around a retrigger against a fresh onset's own.
+    // That version of this test was written first and bite-testing killed it: replacing the fade
+    // with an instant cut of the outgoing hit did not fail it, because the new hit's onset is an
+    // order of magnitude larger than the tail being cut and simply hides it.
+    //
+    // So the outgoing hit is isolated instead. The voice sums its slots linearly and (c) proved
+    // the new hit renders identically every time, so subtracting a fresh hit rendered alone leaves
+    // exactly the outgoing hit's faded contribution — the thing ClickVoice::noteOn's parallel
+    // ramp actually governs. Two claims about it, and a cut or a missing ramp each break one:
+    //   - it is still sounding just after the retrigger, rather than having vanished, and
+    //   - it does reach exact silence shortly after, rather than ringing on underneath.
+    void testRetriggerAddsNoDiscontinuity()
+    {
+        beginTest("(d) The outgoing hit ramps out across a retrigger instead of being cut");
+
+        const int retriggerAt = 100;
+        const int window = 1024;
+
+        // Comfortably longer than the voice's internal ramp, which is not visible from here.
+        const int fadeMustFinishBy = (int) (kSampleRate * 0.010);
+
+        // Far longer than a click would really be set to, and deliberately so: with a realistic
+        // 8 ms decay the outgoing hit reaches the end of its own envelope before the ramp window
+        // closes, and the "does it actually stop" check below can never fail. Bite-testing found
+        // that — removing the ramp entirely still passed. A long decay leaves the hit with plenty
+        // of life left, so the only thing that can silence it is the ramp.
+        const double decay = 0.050;
+
+        // A short window either side of the retrigger. 16 samples is long enough for a stable
+        // level reading on the noise types and short enough that the hit's own decay barely
+        // moves across it.
+        const int levelWindow = 16;
+
+        for (const auto type : kAllTypes)
+        {
+            // One uninterrupted render serves as both references, because the outgoing hit and
+            // the new one are the same hit: solo[k] is the new hit k samples after it starts, and
+            // solo[retriggerAt + k] is what the outgoing hit would have been at that same instant
+            // had nothing interrupted it.
+            const auto solo = render(type, 0.5f, decay, retriggerAt + window);
+
+            ClickVoice voice;
+            voice.prepare(kSampleRate);
+            voice.setType(type);
+            voice.setTone(0.5f);
+            voice.setDecaySeconds(decay);
+            voice.noteOn(60);
+
+            std::vector<float> out((std::size_t) (retriggerAt + window), 0.0f);
+            for (int i = 0; i < (int) out.size(); ++i)
+            {
+                if (i == retriggerAt)
+                    voice.noteOn(60);
+
+                out[(std::size_t) i] = voice.processSample();
+            }
+
+            // Everything from the retrigger on, minus the new hit, is the outgoing hit alone.
+            std::vector<float> residual((std::size_t) window, 0.0f);
+            for (int k = 0; k < window; ++k)
+                residual[(std::size_t) k] = out[(std::size_t) (retriggerAt + k)]
+                                              - solo[(std::size_t) k];
+
+            // Compared against the uninterrupted hit at the same instant, not against its level
+            // before the retrigger. An earlier draft did the latter and failed on tick for a
+            // reason that had nothing to do with ramping: tick's ringing is 68 dB down by the
+            // retrigger point, so its own decay across a 16-sample window swamped the ramp.
+            // Measuring against the same instant removes the decay from the comparison entirely.
+            float faded = 0.0f, unfaded = 0.0f;
+            for (int k = 0; k < levelWindow; ++k)
+            {
+                faded   = std::max(faded,   std::abs(residual[(std::size_t) k]));
+                unfaded = std::max(unfaded, std::abs(solo[(std::size_t) (retriggerAt + k)]));
+            }
+
+            expect(unfaded > 0.0f,
+                   nameOf(type) + " is already silent when the retrigger arrives, so this check "
+                   + "has nothing to measure");
+
+            // The ramp has removed under 10% this early, so anything near half means it is ramping.
+            // What this rules out is the level going to nothing, which is what a cut does.
+            expect(faded > unfaded * 0.5f,
+                   nameOf(type) + " loses the outgoing hit at retrigger (" + juce::String(faded, 6)
+                       + " against an uninterrupted " + juce::String(unfaded, 6)
+                       + ") — it is being cut, not ramped");
+
+            int stillRingingAt = -1;
+            for (int k = fadeMustFinishBy; k < window; ++k)
+                if (residual[(std::size_t) k] != 0.0f)
+                {
+                    stillRingingAt = k;
+                    break;
+                }
+
+            expect(stillRingingAt < 0,
+                   nameOf(type) + " still has the outgoing hit sounding "
+                       + juce::String(stillRingingAt) + " samples after the retrigger, so it is "
+                       + "never being ramped out at all");
+        }
+    }
+
+    // (e) §6's spectral split, measured without an FFT so it can live in the lean target. The FFT
+    // proper is 6a's job in the integration target.
+    //
+    // Measured as mean |x[n] - x[n-1]| divided by mean |x[n]| — how fast the signal moves relative
+    // to how big it is, which is a serviceable stand-in for a spectral centroid. The ratio matters:
+    // the raw first difference alone is NOT monotonic in tone, because a brighter setting also
+    // decays faster, and the two effects cancel almost exactly for tick. Measured, not assumed —
+    // an earlier draft of this test used the raw difference and could not have passed.
+    void testToneRaisesHighFrequencyContent()
+    {
+        beginTest("(e) Raising tone raises high-frequency content");
+
+        for (const auto type : kAllTypes)
+        {
+            double previous = -1.0;
+
+            for (const float tone : { 0.1f, 0.5f, 0.9f })
+            {
+                const auto hit = render(type, tone, 0.008, (int) (kSampleRate * 0.02));
+
+                double sumAbs = 0.0, sumDelta = 0.0;
+                for (std::size_t i = 0; i < hit.size(); ++i)
+                {
+                    sumAbs += std::abs((double) hit[i]);
+                    if (i > 0)
+                        sumDelta += std::abs((double) hit[i] - (double) hit[i - 1]);
+                }
+
+                expect(sumAbs > 0.0, nameOf(type) + " rendered silence at tone "
+                                         + juce::String(tone, 1) + ", so this check is vacuous");
+                if (sumAbs <= 0.0)
+                    return;
+
+                const double brightness = sumDelta / sumAbs;
+
+                expect(brightness > previous,
+                       nameOf(type) + " is no brighter at tone " + juce::String(tone, 1)
+                           + " (" + juce::String(brightness, 4) + ") than at the setting below it ("
+                           + juce::String(previous, 4) + ")");
+
+                previous = brightness;
+            }
+        }
+    }
+};
+
+static Phase5ClickVoiceTest phase5ClickVoiceTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

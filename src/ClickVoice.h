@@ -136,14 +136,17 @@ private:
         // Advance one sample and return this hit's contribution, envelope included.
         float render();
 
-        // True once the exponential fall has reached kSilenceLevel.
-        bool isFinished() const { return envTime >= decaySeconds; }
+        // True once the hit has rendered its full duration. Counted in samples rather than
+        // compared against elapsed seconds: accumulating 1/sampleRate drifts, and at 20 ms /
+        // 44.1 kHz the 882 additions land just short of 0.02, leaving the hit sounding one sample
+        // past where it was asked to stop.
+        bool isFinished() const { return samplesElapsed >= decaySamples; }
 
         Type   type       = Type::tick;  // flavour latched at trigger
         double sampleRate = 44100.0;     // cached at trigger so render() needs no outside lookup
-        double envTime    = 0.0;         // seconds elapsed in this hit; drives the fall
-        double decaySeconds = 0.0;       // clamped duration; also the finished test
-        double decayK     = 0.0;         // fall rate, amp = exp(-envTime * decayK)
+        int    samplesElapsed = 0;       // samples rendered in this hit; the exact clock
+        int    decaySamples   = 0;       // total samples this hit lasts, ceil(decay * sampleRate)
+        double decayK     = 0.0;         // fall rate, amp = exp(-elapsed seconds * decayK)
 
         double lpCoeff    = 0.0;         // one-pole coefficient at the tone cutoff
         double lpState    = 0.0;         // that filter's running output
