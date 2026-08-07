@@ -219,7 +219,7 @@ private:
                 return;
 
             expectEquals(type->choices.size(), 8,
-                         "layer" + n + ".click.type must stay at 8 entries — 4 synth types plus 4 "
+                         "layer" + n + ".click.type must stay at 8 entries - 4 synth types plus 4 "
                          "permanently reserved sample slots");
             expectEquals(type->getIndex(), (int) ParamIDs::ClickType::tick,
                          "layer" + n + ".click.type should default to Tick");
@@ -2027,6 +2027,285 @@ private:
 };
 
 static Phase5MidiDispatchTest phase5MidiDispatchTest;
+
+// Phase5ClickRoutingTest — that a layer's type actually selects which voice it is mixed from.
+//
+// (a) exists to pin a bug that was live for the whole of Phase 4 and was invisible from the GUI.
+// getLayerFlags only ever asked whether a layer's type was Off, so a Click layer read as audible,
+// received its level, and rendered its SubVoice: setting a layer to Click made it sound exactly
+// like a Sub. Nothing in Phase 4 could catch that, because Click was a label with no engine
+// behind it and no test asserted the two produced different audio.
+//
+// The rest of the class checks that adding a second voice per layer did not disturb what §3.3
+// already guarantees — superposition and the mute/solo rules have to hold across mixed types, not
+// just across five Sub layers.
+class Phase5ClickRoutingTest : public juce::UnitTest
+{
+public:
+    Phase5ClickRoutingTest() : juce::UnitTest("Phase5ClickRouting") {}
+
+    void runTest() override
+    {
+        testClickDoesNotSoundLikeSub();
+        testEachClickTypeIsDistinct();
+        testEmptySampleSlotsAreSilent();
+        testSuperpositionAcrossMixedTypes();
+        testMixerRulesApplyToClickLayers();
+    }
+
+private:
+    static constexpr int kNumSamples = 4096;
+    static constexpr double kSampleRate = 44100.0;
+
+    // Written by real-world value so the parameter does its own normalisation, rather than
+    // hardcoding normalised constants that would rot silently if a range changed. Same helper the
+    // Phase 4 mixer and state tests use.
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    static juce::String layerId(int index, const juce::String& suffix)
+    {
+        return "layer" + juce::String(index + 1) + "." + suffix;
+    }
+
+    // prepareToPlay per render, so every voice starts idle and the gain smoothers sit on their
+    // targets — a ramp in one render but not another would look like a routing difference.
+    static std::vector<float> render(DOOFAudioProcessor& processor)
+    {
+        processor.prepareToPlay(kSampleRate, kNumSamples);
+
+        juce::AudioBuffer<float> buffer(2, kNumSamples);
+        juce::MidiBuffer midi;
+        midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+        processor.processBlock(buffer, midi);
+
+        std::vector<float> out((size_t) kNumSamples);
+        const auto* channel = buffer.getReadPointer(0);
+        for (int i = 0; i < kNumSamples; ++i)
+            out[(size_t) i] = channel[i];
+        return out;
+    }
+
+    // Layer 1 only, set to Click with the given choice index; layers 2-5 stay Off.
+    static std::vector<float> renderClick(int clickTypeIndex)
+    {
+        DOOFAudioProcessor processor;
+        setParamValue(processor, layerId(0, "type"), (float) (int) ParamIDs::LayerType::click);
+        setParamValue(processor, layerId(0, "click.type"), (float) clickTypeIndex);
+        return render(processor);
+    }
+
+    static float peakOf(const std::vector<float>& samples)
+    {
+        float peak = 0.0f;
+        for (const auto s : samples)
+            peak = juce::jmax(peak, std::abs(s));
+        return peak;
+    }
+
+    static double biggestDifference(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        double worst = 0.0;
+        for (size_t i = 0; i < a.size(); ++i)
+            worst = juce::jmax(worst, std::abs((double) a[i] - (double) b[i]));
+        return worst;
+    }
+
+    // (a) The Phase 4 bug, pinned. Both halves are needed: a Click layer that rendered silence
+    // would also "differ from a Sub", and would be just as wrong.
+    void testClickDoesNotSoundLikeSub()
+    {
+        beginTest("(a) A Click layer does not render its SubVoice");
+
+        DOOFAudioProcessor subProcessor;
+        const auto sub = render(subProcessor); // the factory patch: layer 1 Sub, the rest Off
+
+        const auto click = renderClick((int) ParamIDs::ClickType::tick);
+
+        expect(peakOf(click) > 0.0f,
+               "A Click layer rendered pure silence, so it is audible per section 3.3 but has no "
+               "voice behind it");
+
+        expect(biggestDifference(sub, click) > 0.1,
+               "A Click layer renders the same audio as a Sub layer - the type is not selecting "
+               "which voice the layer is mixed from");
+    }
+
+    // (b) Selecting a type must change the sound, not merely be stored. Without this, routing
+    // every Click layer to a single hardcoded flavour would pass (a) unnoticed.
+    void testEachClickTypeIsDistinct()
+    {
+        beginTest("(b) Each synthesised click type renders its own sound");
+
+        std::vector<std::vector<float>> rendered;
+        for (int type = 0; type < ClickVoice::kNumTypes; ++type)
+        {
+            rendered.push_back(renderClick(type));
+
+            expect(peakOf(rendered.back()) > 0.0f,
+                   "Click type " + juce::String(type) + " rendered silence");
+        }
+
+        for (size_t a = 0; a < rendered.size(); ++a)
+            for (size_t b = a + 1; b < rendered.size(); ++b)
+                expect(biggestDifference(rendered[a], rendered[b]) > 1.0e-3,
+                       "Click types " + juce::String((int) a) + " and " + juce::String((int) b)
+                         + " render the same audio, so click.type is not reaching the voice");
+    }
+
+    // (c) The four reserved sample slots have no content behind them yet. §2's fixed-range
+    // reasoning only works if an empty slot is genuinely silent — falling back to a synthesised
+    // type would mean a preset saved against a slot changed sound depending on which build opened
+    // it, which is exactly what fixing the choice list at eight entries exists to prevent.
+    void testEmptySampleSlotsAreSilent()
+    {
+        beginTest("(c) A click sample slot with no content behind it is silent, not a fallback");
+
+        for (int slot = ParamIDs::firstClickSampleSlot;
+             slot < ParamIDs::firstClickSampleSlot + ParamIDs::numClickSampleSlots; ++slot)
+        {
+            const auto rendered = renderClick(slot);
+
+            int soundedAt = -1;
+            for (int i = 0; i < kNumSamples; ++i)
+                if (rendered[(size_t) i] != 0.0f)
+                {
+                    soundedAt = i;
+                    break;
+                }
+
+            expect(soundedAt < 0,
+                   "Empty sample slot " + juce::String(slot) + " produced output at sample "
+                     + juce::String(soundedAt) + " - an absent sample must be silent, not a "
+                       "fallback to some other sound");
+        }
+    }
+
+    // (d) §3.3's superposition, now across mixed types. The Phase 4 version of this check used
+    // five Sub layers, so it could not have noticed a second voice being summed twice, or a
+    // layer's click leaking into a neighbour.
+    void testSuperpositionAcrossMixedTypes()
+    {
+        beginTest("(d) A mix of Sub and Click layers equals the sum of the parts");
+
+        // Alternating types, and a different click flavour on each Click layer, so no two layers
+        // render the same signal. Layer 5 stays Off.
+        const int types[] {
+            (int) ParamIDs::LayerType::sub,   (int) ParamIDs::LayerType::click,
+            (int) ParamIDs::LayerType::sub,   (int) ParamIDs::LayerType::click,
+            (int) ParamIDs::LayerType::off
+        };
+        const int clickTypes[] {
+            0, (int) ParamIDs::ClickType::noise, 0, (int) ParamIDs::ClickType::thump, 0
+        };
+
+        auto configure = [&](DOOFAudioProcessor& processor)
+        {
+            for (int i = 0; i < processor.getNumLayers(); ++i)
+            {
+                setParamValue(processor, layerId(i, "type"),  (float) types[i]);
+                setParamValue(processor, layerId(i, "level"), 1.0f);
+                setParamValue(processor, layerId(i, "click.type"), (float) clickTypes[i]);
+
+                // Distinct pitches, so a mixer reading one layer's sub voice for every layer
+                // cannot pass by rendering the same signal five times.
+                processor.getLayer(i).pitchModel.moveNode(0, 0.0, 60.0 + 25.0 * i);
+            }
+        };
+
+        DOOFAudioProcessor processor;
+        configure(processor);
+        const auto mixed = render(processor);
+
+        // Each audible layer alone, via solo, so the solo path is exercised rather than sidestepped
+        // by switching the others Off. Layer 5 is Off and section 3.3 ignores an Off layer's solo,
+        // so it is left out rather than rendered as a silent part.
+        std::vector<double> summed((size_t) kNumSamples, 0.0);
+        for (int layerIndex = 0; layerIndex < 4; ++layerIndex)
+        {
+            DOOFAudioProcessor alone;
+            configure(alone);
+            setParamValue(alone, layerId(layerIndex, "solo"), 1.0f);
+
+            const auto part = render(alone);
+
+            expect(peakOf(part) > 0.0f,
+                   "Layer " + juce::String(layerIndex + 1) + " is silent when soloed, so this "
+                     "superposition check is summing nothing for it");
+
+            for (int i = 0; i < kNumSamples; ++i)
+                summed[(size_t) i] += (double) part[(size_t) i];
+        }
+
+        double worstError = 0.0;
+        int worstIndex = -1;
+        for (int i = 0; i < kNumSamples; ++i)
+        {
+            const double error = std::abs((double) mixed[(size_t) i] - summed[(size_t) i]);
+            if (error > worstError) { worstError = error; worstIndex = i; }
+        }
+
+        // Both paths are linear, so the only difference is float accumulation order — hence a
+        // tolerance rather than a bit-exact comparison, matching the Phase 4 mixer test.
+        expect(worstError < 1.0e-4,
+               "A mix of Sub and Click layers does not equal the sum of its parts (worst error "
+                 + juce::String(worstError) + " at sample " + juce::String(worstIndex) + ")");
+    }
+
+    // (e) A Click layer is a full participant in §3.3, not a special case. Worth asserting
+    // separately because the audibility rule keys off Off alone: a Click layer that was
+    // accidentally treated as Off would go silent here while still looking correct in the GUI.
+    void testMixerRulesApplyToClickLayers()
+    {
+        beginTest("(e) Mute and solo apply to a Click layer the same as to a Sub layer");
+
+        auto twoLayers = [](DOOFAudioProcessor& processor)
+        {
+            setParamValue(processor, layerId(0, "type"), (float) (int) ParamIDs::LayerType::sub);
+            setParamValue(processor, layerId(1, "type"), (float) (int) ParamIDs::LayerType::click);
+            setParamValue(processor, layerId(1, "click.type"), (float) (int) ParamIDs::ClickType::noise);
+        };
+
+        // Muting the Click layer must leave exactly the Sub layer.
+        {
+            DOOFAudioProcessor processor;
+            twoLayers(processor);
+            setParamValue(processor, layerId(1, "mute"), 1.0f);
+            const auto withClickMuted = render(processor);
+
+            DOOFAudioProcessor subOnly;
+            const auto sub = render(subOnly);
+
+            expect(biggestDifference(withClickMuted, sub) < 1.0e-4,
+                   "Muting a Click layer did not remove it from the mix");
+        }
+
+        // Soloing the Click layer must remove the Sub layer — which only happens if the Click
+        // layer counts as soloed at all.
+        {
+            DOOFAudioProcessor processor;
+            twoLayers(processor);
+            setParamValue(processor, layerId(1, "solo"), 1.0f);
+            const auto clickSoloed = render(processor);
+
+            const auto clickAlone = renderClick((int) ParamIDs::ClickType::noise);
+
+            expect(peakOf(clickSoloed) > 0.0f,
+                   "Soloing a Click layer silenced everything, so the click is being treated as an "
+                   "Off layer by the audibility rule");
+
+            expect(biggestDifference(clickSoloed, clickAlone) < 1.0e-4,
+                   "Soloing a Click layer did not leave exactly that layer - the Sub layer is "
+                   "still leaking into the mix");
+        }
+    }
+};
+
+static Phase5ClickRoutingTest phase5ClickRoutingTest;
 
 
 

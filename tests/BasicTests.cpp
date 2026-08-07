@@ -1344,7 +1344,7 @@ private:
             expect(faded > unfaded * 0.5f,
                    nameOf(type) + " loses the outgoing hit at retrigger (" + juce::String(faded, 6)
                        + " against an uninterrupted " + juce::String(unfaded, 6)
-                       + ") — it is being cut, not ramped");
+                       + ") - it is being cut, not ramped");
 
             int stillRingingAt = -1;
             for (int k = fadeMustFinishBy; k < window; ++k)
