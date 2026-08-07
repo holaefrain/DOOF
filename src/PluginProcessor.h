@@ -145,10 +145,35 @@ private:
         std::atomic<float>* level = nullptr;
         std::atomic<float>* mute  = nullptr;
         std::atomic<float>* solo  = nullptr;
+
+        // Phase 5's click controls. Cached for the same reason as the four above — these are read
+        // once per block to configure the layer's ClickVoice, and a string lookup per layer per
+        // block would be pure waste in the audio callback.
+        std::atomic<float>* clickType  = nullptr;
+        std::atomic<float>* clickTone  = nullptr;
+        std::atomic<float>* clickDecay = nullptr;
     };
 
     std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;
     std::atomic<float>* masterGainParam = nullptr;
+
+    // Which of a layer's two voices its output is taken from for the current block.
+    //
+    // `silent` is not the same as an Off layer. It means a Click layer pointed at one of the four
+    // reserved sample slots with no content behind it — audible as far as §3.3's mute/solo rule is
+    // concerned, but with nothing to play. Step 4 replaces that case with real sample playback;
+    // until then, and whenever a slot is genuinely empty, an empty slot is simply silent rather
+    // than falling back to some other sound.
+    enum class LayerSource : unsigned char { sub, click, silent };
+
+    // Resolved once per block in processBlock, never per sample: reading the type parameter inside
+    // the render loop would both cost an atomic load per layer per sample and let the answer
+    // change halfway through a block.
+    std::array<LayerSource, LayerAudibility::kNumLayers> layerSource;
+
+    // Reads one layer's click parameters into its ClickVoice and returns which voice the layer
+    // should be mixed from. Called once per layer per block, on the audio thread.
+    LayerSource configureLayerSource(int index);
 
     // Reads one layer's mixer flags from the cached pointers above. Audio-thread
     // safe: plain atomic loads, no strings, no allocation. Choice and bool

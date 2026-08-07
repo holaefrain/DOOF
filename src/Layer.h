@@ -2,6 +2,7 @@
 #include "EnvelopeModel.h"
 #include "EnvelopePublisher.h"
 #include "SubVoice.h"
+#include "ClickVoice.h"
 
 // Layer — one of DOOF's five layers (§3.2 of project-architecture.md): its own
 // pitch and amp envelope models, the publisher bridging them to the audio
@@ -40,7 +41,14 @@ struct Layer
     EnvelopeModel     pitchModel; // node-based pitch envelope, message-thread only
     EnvelopeModel     ampModel;   // node-based amp envelope, message-thread only
     EnvelopePublisher publisher;  // rebuilds + atomically publishes this layer's snapshot on edit
-    SubVoice          voice;      // renders this layer when its type is Sub
+
+    // Both voices exist on every layer regardless of its type, and both are ticked every sample —
+    // only the one the type selects is mixed. Holding them side by side rather than swapping
+    // between them means switching a layer's type mid-note cannot resume the newly-selected voice
+    // from a stale position, and an idle voice costs almost nothing. Renamed from plain `voice` in
+    // Phase 5, when there was no longer only one.
+    SubVoice          subVoice;   // renders this layer when its type is Sub
+    ClickVoice        clickVoice; // renders this layer when its type is Click
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Layer)
 };

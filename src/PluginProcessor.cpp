@@ -79,11 +79,17 @@ DOOFAudioProcessor::DOOFAudioProcessor()
         cached.mute  = apvts.getRawParameterValue(ParamIDs::layerMute(i));
         cached.solo  = apvts.getRawParameterValue(ParamIDs::layerSolo(i));
 
+        cached.clickType  = apvts.getRawParameterValue(ParamIDs::layerClickType(i));
+        cached.clickTone  = apvts.getRawParameterValue(ParamIDs::layerClickTone(i));
+        cached.clickDecay = apvts.getRawParameterValue(ParamIDs::layerClickDecay(i));
+
         // A null here means an ID in ParamIDs disagrees with the one
         // createParameterLayout() registered — the mixer would then silently
         // read nothing for that control.
         jassert(cached.type != nullptr && cached.level != nullptr
                  && cached.mute != nullptr && cached.solo != nullptr);
+        jassert(cached.clickType != nullptr && cached.clickTone != nullptr
+                 && cached.clickDecay != nullptr);
     }
 }
 
@@ -264,7 +270,14 @@ void DOOFAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*
     // mid-session must be ready to sound without waiting for another
     // prepareToPlay call from the host.
     for (int i = 0; i < getNumLayers(); ++i)
-        getLayer(i).voice.prepare(sampleRate);
+    {
+        getLayer(i).subVoice.prepare(sampleRate);
+        getLayer(i).clickVoice.prepare(sampleRate);
+    }
+
+    // Every layer starts on its sub voice; the first processBlock resolves the real answer from
+    // the type parameter before anything is rendered.
+    layerSource.fill(LayerSource::sub);
 
     // Each layer's gain starts *at* its target rather than ramping up to it, so
     // opening a session doesn't fade the first note in from silence. Only later
@@ -340,7 +353,10 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 
         // Load each snapshot once for the whole block (§2: the audio thread
         // loads the atomic pointer once per block, never per-sample).
-        layer.voice.setSnapshot(layer.publisher.getSnapshot());
+        layer.subVoice.setSnapshot(layer.publisher.getSnapshot());
+
+        // Click controls likewise: read once here, latched by ClickVoice at the next note-on.
+        layerSource[(size_t) i] = configureLayerSource(i);
 
         // Ramped, not assigned — see kGainRampSeconds.
         layerGain[(size_t) i].setTargetValue(getTargetGain(i, anySoloed));
@@ -372,16 +388,56 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         renderRange(buffer, rendered, eventPos - rendered, gain);
         rendered = eventPos;
 
-        // Note-ons go to every layer's voice, including Off ones. A layer switched
-        // on part-way through a note then plays from the right point in the
-        // envelope rather than restarting, and switching one on between notes costs
-        // nothing since its voice is already idle.
+        // Note-ons go to both of every layer's voices, including Off ones and including whichever
+        // voice the layer's type is not currently selecting. A layer switched on — or switched
+        // between Sub and Click — part-way through a note then plays from the right point rather
+        // than restarting, and triggering an unselected voice costs nothing since its output is
+        // never read.
         for (int i = 0; i < getNumLayers(); ++i)
-            getLayer(i).voice.noteOn(msg.getNoteNumber());
+        {
+            getLayer(i).subVoice.noteOn(msg.getNoteNumber());
+            getLayer(i).clickVoice.noteOn(msg.getNoteNumber());
+        }
     }
 
     // Everything after the last event — the whole block when there was no note-on at all.
     renderRange(buffer, rendered, numSamples - rendered, gain);
+}
+
+// Pushes one layer's click parameters into its ClickVoice and answers which voice the layer is
+// mixed from this block.
+//
+// Called once per layer per block, on the audio thread: plain atomic loads and stores into the
+// voice, no strings and no allocation. ClickVoice latches these at its next note-on rather than
+// reading them per sample, so setting them at block rate is exactly the right granularity — a hit
+// already in flight is never reshaped underneath itself.
+DOOFAudioProcessor::LayerSource DOOFAudioProcessor::configureLayerSource(int index)
+{
+    jassert(juce::isPositiveAndBelow(index, getNumLayers()));
+
+    const auto& cached = layerParams[(size_t) index];
+    auto& layer = getLayer(index);
+
+    layer.clickVoice.setTone(cached.clickTone->load());
+    layer.clickVoice.setDecaySeconds((double) cached.clickDecay->load());
+
+    // Compared against the LayerType index rather than a bare integer, so the mapping stays tied
+    // to the enum — same reasoning as getLayerFlags.
+    if ((int) cached.type->load() != (int) ParamIDs::LayerType::click)
+        return LayerSource::sub;
+
+    const int slot = (int) cached.clickType->load();
+
+    // The first four choice entries are ClickVoice::Type values, guaranteed by the static_asserts
+    // in ParamIDs.h. The remaining four are the reserved sample slots, which have no content
+    // behind them yet — Step 4 fills them in. An empty slot is silent rather than falling back to
+    // a synthesised type, so a preset saved against a slot sounds the same whether or not the
+    // build it is loaded into happens to ship that sample.
+    if (! juce::isPositiveAndBelow(slot, ClickVoice::kNumTypes))
+        return LayerSource::silent;
+
+    layer.clickVoice.setType((ClickVoice::Type) slot);
+    return LayerSource::click;
 }
 
 // Renders and mixes one contiguous span of the block, from startSample for numSamples. Called once
@@ -411,10 +467,29 @@ void DOOFAudioProcessor::renderRange(juce::AudioBuffer<float>& buffer, int start
         // the note actually is; it would also bypass the gain ramp and turn
         // switching a layer Off mid-tail into an instant cut. Idle voices
         // already cost almost nothing.
+        //
+        // The same argument applies to a layer's two voices: both are advanced, and only the one
+        // the type selects is mixed. Ticking just the selected voice would freeze the other's
+        // internal time, so switching a layer between Sub and Click mid-note would resume the
+        // newly-selected voice from wherever the last switch left it.
         float mixed = 0.0f;
         for (int layerIndex = 0; layerIndex < getNumLayers(); ++layerIndex)
-            mixed += getLayer(layerIndex).voice.processSample()
-                       * layerGain[(size_t) layerIndex].getNextValue();
+        {
+            auto& layer = getLayer(layerIndex);
+
+            const float sub   = layer.subVoice.processSample();
+            const float click = layer.clickVoice.processSample();
+
+            float selected = 0.0f;
+            switch (layerSource[(size_t) layerIndex])
+            {
+                case LayerSource::sub:    selected = sub;   break;
+                case LayerSource::click:  selected = click; break;
+                case LayerSource::silent:                   break;
+            }
+
+            mixed += selected * layerGain[(size_t) layerIndex].getNextValue();
+        }
 
         float sample = mixed * gain;
 
