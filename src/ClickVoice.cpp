@@ -6,7 +6,7 @@ void ClickVoice::prepare(double sr)
 {
     sampleRate = sr;
 
-    for (auto& slot : slots)
+    for (auto& slot : fadePool)
         slot = Slot{};
 }
 
@@ -19,15 +19,15 @@ void ClickVoice::noteOn(int midiNote)
     // Every hit still sounding starts ramping out. Already-fading hits keep the ramp they are on:
     // restarting it on each retrigger would let a fast pattern hold a hit at a fixed level
     // indefinitely, which is the opposite of what the ramp is for.
-    for (auto& slot : slots)
+    for (auto& slot : fadePool)
         if (slot.running && ! slot.fading)
         {
             slot.fading   = true;
             slot.fadeTime = 0.0;
         }
 
-    auto& target = slots[(size_t) chooseSlot()];
-    target.gen.start(pendingType, pendingTone, pendingDecaySeconds, sampleRate);
+    auto& target = fadePool[(size_t) chooseSlot()];
+    target.gen.start(pendingSlot, sampleFor(pendingSlot), pendingTone, pendingDecaySeconds, sampleRate);
     target.running  = true;
     target.fading   = false;
     target.fadeTime = 0.0;
@@ -40,7 +40,7 @@ float ClickVoice::processSample()
     const double dt = 1.0 / sampleRate;
     double out = 0.0;
 
-    for (auto& slot : slots)
+    for (auto& slot : fadePool)
     {
         if (! slot.running)
             continue;
@@ -77,7 +77,7 @@ float ClickVoice::processSample()
 
 bool ClickVoice::isIdle() const
 {
-    for (const auto& slot : slots)
+    for (const auto& slot : fadePool)
         if (slot.running)
             return false;
 
@@ -92,9 +92,9 @@ int ClickVoice::chooseSlot() const
     int best = 0;
     double bestProgress = -1.0;
 
-    for (int i = 0; i < kNumSlots; ++i)
+    for (int i = 0; i < kNumFadeSlots; ++i)
     {
-        const auto& slot = slots[(size_t) i];
+        const auto& slot = fadePool[(size_t) i];
 
         if (! slot.running)
             return i;
@@ -110,25 +110,56 @@ int ClickVoice::chooseSlot() const
     return best;
 }
 
+// Decoded content for a choice index, or null when the index names a synthesised type or a sample
+// slot with nothing behind it. A null here is the ordinary case for a build with an empty
+// resources/clicks/, not an error.
+const ClickSample* ClickVoice::sampleFor(int slotIndex) const
+{
+    if (sampleSlots == nullptr || ! juce::isPositiveAndBelow(slotIndex - kNumTypes, kNumSampleSlots))
+        return nullptr;
+
+    const auto& candidate = sampleSlots[slotIndex - kNumTypes];
+    return candidate.isLoaded() ? &candidate : nullptr;
+}
+
+bool ClickVoice::hasContentFor(int slotIndex) const
+{
+    if (juce::isPositiveAndBelow(slotIndex, kNumTypes))
+        return true;
+
+    return sampleFor(slotIndex) != nullptr;
+}
+
 // ── Generator ─────────────────────────────────────────────────────────────────
 
 // Latch the controls into a fresh hit. Everything derived from tone and decay is computed once
 // here rather than per sample, so render() stays a handful of multiplies.
-void ClickVoice::Generator::start(Type typeToUse, float toneNormalised, double decay, double sr)
+void ClickVoice::Generator::start(int slotToPlay, const ClickSample* sampleToPlay,
+                                  float toneNormalised, double decay, double sr)
 {
-    type       = typeToUse;
+    // A synthesised type when there is no sample behind the slot. An out-of-range slot index falls
+    // back to tick rather than reading past the enum, but the processor never sends one — it asks
+    // hasContentFor() first and mixes silence instead.
+    sample = sampleToPlay;
+    type = juce::isPositiveAndBelow(slotToPlay, kNumTypes) ? (Type) slotToPlay : Type::tick;
+
     sampleRate = sr;
     samplesElapsed = 0;
     lpState    = 0.0;
     bandState  = 0.0;
     impulseSpent = false;
 
+    // Rate conversion: step through the file at its own rate relative to the device's, so a
+    // 44.1 kHz asset keeps its pitch and length when the host is running at 48 or 96 kHz.
+    readPosition  = 0.0;
+    readIncrement = (sample != nullptr) ? sample->sourceSampleRate / sampleRate : 1.0;
+
     // Thump starts a quarter cycle in, at the sine's peak rather than at its zero crossing. From
     // zero it would fade in over the first quarter cycle — 0.8 ms at the bottom of the tone range,
     // a large fraction of the whole hit — which is a swell, not a transient. Starting at the peak
     // makes it a click, and its level then stays consistent across the tone sweep instead of
     // depending on how much of a cycle fits inside the decay.
-    phase = (typeToUse == Type::thump) ? juce::MathConstants<double>::halfPi : 0.0;
+    phase = (type == Type::thump) ? juce::MathConstants<double>::halfPi : 0.0;
 
     // Re-seeded to the same value on every hit, which is what makes two identical triggers render
     // identically — the property the null tests depend on.
@@ -161,6 +192,14 @@ void ClickVoice::Generator::start(Type typeToUse, float toneNormalised, double d
 
     sineFreq = kMinThumpHz * std::pow(kMaxThumpHz / kMinThumpHz, tone);
 
+    // A sample carries its own level, so nothing is scaled and nothing is compensated - the layer's
+    // Level parameter is the control for that.
+    if (sample != nullptr)
+    {
+        levelScale = 1.0;
+        return;
+    }
+
     switch (type)
     {
         case Type::tick:
@@ -188,6 +227,11 @@ void ClickVoice::Generator::start(Type typeToUse, float toneNormalised, double d
 // One sample of this hit: a source shaped by the tone filter, times the exponential fall.
 float ClickVoice::Generator::render()
 {
+    // Sample playback takes a different path entirely, so it is handled before the envelope below
+    // rather than as a fifth case in the switch.
+    if (sample != nullptr)
+        return renderSample();
+
     // Derived from the sample count rather than accumulated, so it cannot drift away from the
     // duration isFinished() is measuring against.
     const double elapsedSeconds = (double) samplesElapsed / sampleRate;
@@ -250,4 +294,35 @@ float ClickVoice::Generator::render()
     ++samplesElapsed;
 
     return (float) (source * levelScale * amp);
+}
+
+// One sample of a slot's decoded content, read at the file's own rate relative to the device's and
+// shaped by the tone control.
+//
+// Two deliberate differences from the synthesised path:
+//
+//   - The decay envelope is NOT applied. A sample's envelope is part of its content, and the decay
+//     range tops out at 50 ms, so applying it would truncate almost every real click sample at the
+//     8 ms default and leave the user with no way to tell why their sample sounds broken. A sample
+//     plays to its natural end; the layer's Level parameter is the volume control.
+//   - Tone is a plain low-pass rather than the band-pass the synthesised types use. Subtracting the
+//     lower corner is what gives a synthesised impulse or noise burst its edge, but doing it to a
+//     recording would gut its low end. Here tone means brightness and nothing else.
+float ClickVoice::Generator::renderSample()
+{
+    // isFinished() is tested before every render(), so the read head is always at least one whole
+    // sample short of the end and this interpolation cannot read past the buffer.
+    const int index = (int) readPosition;
+    jassert(index >= 0 && index + 1 < sample->numSamples);
+
+    const double fraction = readPosition - (double) index;
+    const double raw = (double) sample->data[index] * (1.0 - fraction)
+                         + (double) sample->data[index + 1] * fraction;
+
+    lpState += lpCoeff * (raw - lpState);
+
+    readPosition += readIncrement;
+    ++samplesElapsed;
+
+    return (float) lpState;
 }

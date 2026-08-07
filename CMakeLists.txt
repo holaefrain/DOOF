@@ -80,6 +80,7 @@ target_sources(DOOF
         src/EnvelopeCanvas.cpp    # central canvas: pitch+amp curve rendering (§3.4)
         src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
         src/ClickVoice.cpp        # synthesised click transient: tick/noise/snap/thump + tone filter
+        src/ClickSampleLibrary.cpp # decodes the embedded factory click samples (message thread only)
         src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
         src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
         src/EnvelopeEvaluator.cpp # precomputes an EnvelopeModel into a lookup table
@@ -176,6 +177,7 @@ target_sources(DOOFIntegrationTests
         src/EnvelopeCanvas.cpp
         src/SubVoice.cpp
         src/ClickVoice.cpp
+        src/ClickSampleLibrary.cpp
         src/EnvelopeModel.cpp
         src/BezierSegment.cpp
         src/EnvelopeEvaluator.cpp

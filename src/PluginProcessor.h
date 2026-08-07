@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Layer.h"
+#include "ClickSampleLibrary.h"
 #include "LayerAudibility.h"
 #include "LayerViewPrefs.h"
 #include <array>
@@ -118,6 +119,12 @@ private:
     // below, whose models take a pointer to it — C++ constructs members in
     // declaration order regardless of initializer list order.
     juce::UndoManager envelopeUndoManager { 1, 30 };
+
+    // Factory click samples, decoded once here on the message thread. Declared before the layers
+    // below for the same reason as the undo manager: their voices are handed pointers into it, so
+    // it must be constructed first and destroyed last. C++ constructs members in declaration order
+    // regardless of initialiser list order.
+    ClickSampleLibrary clickSamples;
 
     // The five layers (§3.2), each owning its own envelope models, publisher
     // and voice. Held by unique_ptr because Layer is neither default-

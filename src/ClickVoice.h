@@ -17,6 +17,26 @@
 // is what makes null-testing the engine possible at all.
 //
 // Retrigger differs from SubVoice's choke on purpose; see noteOn().
+
+// One decoded click sample, pointing at buffers this voice does not own.
+//
+// Kept as a bare pointer + length rather than an AudioBuffer so ClickVoice can stay juce_core
+// only: decoding a WAV needs juce_audio_formats, which would drag the whole audio stack into the
+// lean test target. ClickSampleLibrary does the decoding once on the message thread and hands
+// these across; the audio thread only ever reads them.
+//
+// The buffers must outlive every voice pointing at them. In practice the library is a member of
+// DOOFAudioProcessor constructed before the layers, so that holds by construction.
+struct ClickSample
+{
+    const float* data = nullptr;    // mono samples, or null for a slot with no content
+    int numSamples = 0;             // length of data
+    double sourceSampleRate = 0.0;  // the rate the file was recorded at, for rate conversion
+
+    // An empty slot is a normal state, not an error - resources/clicks/ ships empty.
+    bool isLoaded() const { return data != nullptr && numSamples > 1 && sourceSampleRate > 0.0; }
+};
+
 class ClickVoice
 {
 public:
@@ -38,6 +58,12 @@ public:
     // neither has to restate the count and drift from this enum.
     static constexpr int kNumTypes = 4;
 
+    // Sample slots sit immediately after the synthesised types, so a slot index runs
+    // [kNumTypes, kNumSlots). Permanently four of them - see ParamIDs::ClickType for why the
+    // count can never change once a preset exists.
+    static constexpr int kNumSampleSlots = 4;
+    static constexpr int kNumSlots = kNumTypes + kNumSampleSlots;
+
     // Prepare the voice for playback at the given sample rate and silence it.
     // Must be called before any processSample() or noteOn(), same contract as SubVoice::prepare.
     void prepare(double sampleRate);
@@ -48,7 +74,22 @@ public:
     // (plain stores, no allocation); PluginProcessor sets them once per block from the APVTS.
 
     // Which of the four flavours the next hit uses.
-    void setType(Type type) { pendingType = type; }
+    void setType(Type type) { pendingSlot = (int) type; }
+
+    // Which of the eight slots the next hit uses: 0-3 are the synthesised types above, 4-7 index
+    // into the sample slots handed to setSampleSlots(). Takes the parameter's choice index
+    // directly, so the processor never has to translate between the two numbering schemes.
+    void setSlot(int slotIndex) { pendingSlot = slotIndex; }
+
+    // Points the voice at the decoded sample slots. `slots` must address kNumSampleSlots entries
+    // and outlive this voice; null means no samples at all, which is the normal state of a build
+    // with an empty resources/clicks/. Called once at construction, never on the audio thread.
+    void setSampleSlots(const ClickSample* slots) { sampleSlots = slots; }
+
+    // Whether a slot would actually make a sound: true for the four synthesised types, and for a
+    // sample slot only when something is loaded behind it. The processor asks this to decide
+    // whether the layer has anything to mix, rather than inferring it from the index alone.
+    bool hasContentFor(int slotIndex) const;
 
     // Brightness, normalised 0 (dark) to 1 (bright). Drives the one-pole cutoff for tick/noise/
     // snap, and the blip frequency for thump. Clamped on latch, so an out-of-range value from a
@@ -122,7 +163,10 @@ private:
     // How many hits can be ramping out at once, on top of the live one. Four covers retriggering
     // up to roughly 800 Hz before the quietest ramp has to be dropped early — far past anything a
     // kick pattern produces, and still only a handful of small structs, allocated once.
-    static constexpr int kNumSlots = 5;
+    //
+    // Distinct from kNumSlots above, which counts entries in the click type parameter. These are
+    // concurrently-sounding hits and have nothing to do with which click is selected.
+    static constexpr int kNumFadeSlots = 5;
 
     // ── One hit ───────────────────────────────────────────────────────────────
     // All the state a single click needs, so an outgoing hit can be left running untouched in its
@@ -131,18 +175,37 @@ private:
     struct Generator
     {
         // Latch the controls and reset every piece of per-hit state. Called once per trigger.
-        void start(Type typeToUse, float toneNormalised, double decaySeconds, double sr);
+        // `slotToPlay` is a choice index; `sampleToPlay` is the slot's decoded content, or null
+        // for a synthesised type.
+        void start(int slotToPlay, const ClickSample* sampleToPlay,
+                   float toneNormalised, double decaySeconds, double sr);
 
         // Advance one sample and return this hit's contribution, envelope included.
         float render();
 
-        // True once the hit has rendered its full duration. Counted in samples rather than
-        // compared against elapsed seconds: accumulating 1/sampleRate drifts, and at 20 ms /
-        // 44.1 kHz the 882 additions land just short of 0.02, leaving the hit sounding one sample
-        // past where it was asked to stop.
-        bool isFinished() const { return samplesElapsed >= decaySamples; }
+        // The sample-playback half of render(), split out because it shares almost nothing with
+        // the synthesised path - no decay envelope, and a plain low-pass rather than a band.
+        float renderSample();
 
+        // True once the hit is over. For a synthesised type that is its full decay duration,
+        // counted in samples rather than compared against elapsed seconds: accumulating
+        // 1/sampleRate drifts, and at 20 ms / 44.1 kHz the 882 additions land just short of 0.02,
+        // leaving the hit sounding one sample past where it was asked to stop. For a sample it is
+        // simply the end of the file - see render() for why decay does not truncate a sample.
+        bool isFinished() const
+        {
+            if (sample != nullptr)
+                return readPosition >= (double) (sample->numSamples - 1);
+
+            return samplesElapsed >= decaySamples;
+        }
+
+        // What this hit is playing. sample is null for a synthesised type, in which case type
+        // selects the flavour.
         Type   type       = Type::tick;  // flavour latched at trigger
+        const ClickSample* sample = nullptr; // decoded content when playing a sample slot
+        double readPosition  = 0.0;      // fractional read head into sample->data
+        double readIncrement = 1.0;      // sourceSampleRate / sampleRate, so pitch stays correct
         double sampleRate = 44100.0;     // cached at trigger so render() needs no outside lookup
         int    samplesElapsed = 0;       // samples rendered in this hit; the exact clock
         int    decaySamples   = 0;       // total samples this hit lasts, ceil(decay * sampleRate)
@@ -174,12 +237,24 @@ private:
     // its ramp-down, which is the quietest thing to displace.
     int chooseSlot() const;
 
-    std::array<Slot, kNumSlots> slots;   // fixed pool, sized at compile time — never allocated
+    // Fixed pool, sized at compile time — never allocated. Named for the retrigger ramp rather
+    // than for the click type slots above, which are an unrelated meaning of the word: these are
+    // concurrently-sounding hits, those are entries in the type parameter.
+    std::array<Slot, kNumFadeSlots> fadePool;
+
     double sampleRate = 44100.0;         // cached from prepare() for the fade timing
+
+    // Decoded sample content for slots kNumTypes..kNumSlots, owned by ClickSampleLibrary. Null
+    // when the build embeds no samples at all, which is the normal state of this repo.
+    const ClickSample* sampleSlots = nullptr;
+
+    // Returns the decoded content for a choice index, or null when the index names a synthesised
+    // type or a sample slot with nothing behind it.
+    const ClickSample* sampleFor(int slotIndex) const;
 
     // Controls awaiting the next trigger. Held separately from the running hits so setting one
     // mid-click cannot reach into a transient already in flight.
-    Type   pendingType = Type::tick;
+    int    pendingSlot = (int) Type::tick;
     float  pendingTone = 0.5f;
     double pendingDecaySeconds = 0.005;
 };

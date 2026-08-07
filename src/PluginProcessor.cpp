@@ -58,6 +58,12 @@ DOOFAudioProcessor::DOOFAudioProcessor()
     for (int i = 0; i < getNumLayers(); ++i)
         seedLayerWithDefaults(i);
 
+    // Point every click voice at the decoded factory samples. Done once here rather than in
+    // prepareToPlay because the buffers never change after construction - there is nothing to
+    // republish and no snapshot to swap.
+    for (int i = 0; i < getNumLayers(); ++i)
+        getLayer(i).clickVoice.setSampleSlots(clickSamples.slots());
+
     // Seeding above went through the normal undoable edit path, so it left one
     // transaction per added node in the history — roughly 70 across ten models,
     // which would both fill the entire 30-step cap with factory setup and let
@@ -427,17 +433,14 @@ DOOFAudioProcessor::LayerSource DOOFAudioProcessor::configureLayerSource(int ind
         return LayerSource::sub;
 
     const int slot = (int) cached.clickType->load();
+    layer.clickVoice.setSlot(slot);
 
     // The first four choice entries are ClickVoice::Type values, guaranteed by the static_asserts
-    // in ParamIDs.h. The remaining four are the reserved sample slots, which have no content
-    // behind them yet — Step 4 fills them in. An empty slot is silent rather than falling back to
-    // a synthesised type, so a preset saved against a slot sounds the same whether or not the
-    // build it is loaded into happens to ship that sample.
-    if (! juce::isPositiveAndBelow(slot, ClickVoice::kNumTypes))
-        return LayerSource::silent;
-
-    layer.clickVoice.setType((ClickVoice::Type) slot);
-    return LayerSource::click;
+    // in ParamIDs.h; the remaining four are sample slots, which may or may not have content behind
+    // them in this build. The voice is asked rather than the index inspected, so that an empty slot
+    // is silent instead of falling back to a synthesised type - a preset saved against a slot then
+    // sounds the same whether or not the build it is loaded into happens to ship that sample.
+    return layer.clickVoice.hasContentFor(slot) ? LayerSource::click : LayerSource::silent;
 }
 
 // Renders and mixes one contiguous span of the block, from startSample for numSamples. Called once
