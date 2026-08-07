@@ -11,6 +11,47 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Pull in JUCE from the local submodule so the build is fully self-contained.
 add_subdirectory(JUCE)
 
+# ─── Factory click samples (Phase 5) ──────────────────────────────────────────
+# Embeds any .wav in resources/clicks/ into the binary, filling the four sample slots of the
+# layerN.click.type parameter.
+#
+# An EMPTY resources/clicks/ is the normal state of this repo and must always build and pass.
+# §8 lists factory content licensing as a project risk, so no audio is committed — the pipeline
+# ships complete and the slots stay empty until license-clear files are supplied. A slot with
+# nothing behind it is silent, which Phase5ClickRoutingTest (c) pins.
+#
+# CONFIGURE_DEPENDS so that dropping a .wav into the folder re-runs CMake on the next build
+# instead of being silently ignored until someone reconfigures by hand.
+file(GLOB DOOF_CLICK_SAMPLE_FILES CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/resources/clicks/*.wav")
+
+if(DOOF_CLICK_SAMPLE_FILES)
+    list(LENGTH DOOF_CLICK_SAMPLE_FILES DOOF_CLICK_SAMPLE_COUNT)
+    message(STATUS "DOOF: embedding ${DOOF_CLICK_SAMPLE_COUNT} factory click sample(s)")
+
+    # Sorted so slot order is alphabetical by filename and identical on every machine. The glob's
+    # own order is filesystem-dependent, which would make a preset's slot mean different things on
+    # different build hosts.
+    list(SORT DOOF_CLICK_SAMPLE_FILES)
+
+    juce_add_binary_data(DOOFClickSamples SOURCES ${DOOF_CLICK_SAMPLE_FILES})
+    set(DOOF_HAS_CLICK_SAMPLES 1)
+else()
+    message(STATUS "DOOF: no factory click samples found - the four sample slots will be silent")
+    set(DOOF_HAS_CLICK_SAMPLES 0)
+endif()
+
+# Applies the define, and the binary-data target when there is one, to a target that needs to read
+# click samples. Used by the plugin and the integration tests; deliberately NOT by DOOFTests, which
+# stays lean (juce_core only) and never decodes audio.
+function(doof_link_click_samples target)
+    target_compile_definitions(${target} PRIVATE DOOF_HAS_CLICK_SAMPLES=${DOOF_HAS_CLICK_SAMPLES})
+
+    if(DOOF_HAS_CLICK_SAMPLES)
+        target_link_libraries(${target} PRIVATE DOOFClickSamples)
+    endif()
+endfunction()
+
 # ─── Plugin target ────────────────────────────────────────────────────────────
 # Main plugin artefact: builds VST3 and Standalone formats.
 # IS_SYNTH + NEEDS_MIDI_INPUT configure JUCE's bus/MIDI plumbing for a synth.
@@ -71,6 +112,9 @@ target_link_libraries(DOOF
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+# Factory click samples: embedded when resources/clicks/ has any .wav, silent slots when it doesn't.
+doof_link_click_samples(DOOF)
 
 # ─── Unit tests ───────────────────────────────────────────────────────────────
 # Headless console app that runs all juce::UnitTest subclasses via CTest.
@@ -166,6 +210,10 @@ target_link_libraries(DOOFIntegrationTests
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+# Same click-sample wiring as the plugin, so the tests exercise the real loading path rather than
+# a stand-in — including the empty case, which is what this repo normally builds.
+doof_link_click_samples(DOOFIntegrationTests)
 
 # Register the test binaries with CTest so `ctest` discovers and runs them automatically.
 enable_testing()
