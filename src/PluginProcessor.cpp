@@ -208,9 +208,52 @@ DOOFAudioProcessor::createParameterLayout()
             "Layer " + layerNumber + " Solo",
             false
         ));
+
+        // Click controls (§6 Phase 5: "per-click level/tone"). Level is the layer's existing
+        // level parameter — a click does not get a second one — so what a Click layer adds is
+        // which click, how bright, and how long.
+        //
+        // Registered for every layer regardless of its type, exactly as the envelope models are
+        // seeded for every layer: switching a layer to Click must sound immediately rather than
+        // waiting for a parameter that only exists once the type has changed.
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { ParamIDs::layerClickType(i), 1 },
+            "Layer " + layerNumber + " Click Type",
+            ParamIDs::clickTypeChoices(),
+            (int) ParamIDs::ClickType::tick
+        ));
+
+        // Normalised rather than expressed in Hz: tone means a different thing per click type
+        // (a filter corner for tick/noise/snap, a blip frequency for thump), so there is no one
+        // honest unit to give it. ClickVoice maps it exponentially internally, which is the log
+        // skew §0.5 asks for on frequency controls.
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerClickTone(i), 1 },
+            "Layer " + layerNumber + " Click Tone",
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            0.5f
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerClickDecay(i), 1 },
+            "Layer " + layerNumber + " Click Decay",
+            clickDecayRange(),
+            ParamIDs::clickDecayDefaultSeconds
+        ));
     }
 
     return layout;
+}
+
+// Skewed so the default 8 ms sits at the centre of the control's travel. §0.5 settles on a log
+// skew for time parameters, and without it the 1-20 ms range §6 actually cares about would be
+// crushed into the bottom third of the knob while the rarely-wanted long end took the rest.
+juce::NormalisableRange<float> DOOFAudioProcessor::clickDecayRange()
+{
+    juce::NormalisableRange<float> range { ParamIDs::clickDecayMinSeconds,
+                                           ParamIDs::clickDecayMaxSeconds };
+    range.setSkewForCentre(ParamIDs::clickDecayDefaultSeconds);
+    return range;
 }
 
 // Prepare the voice and DC blocker for the upcoming playback session.

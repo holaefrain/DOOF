@@ -122,6 +122,7 @@ public:
     {
         testAllExpectedParametersExist();
         testDefaultsPreserveThePrePhase4Patch();
+        testClickDefaultsAndRanges();
     }
 
 private:
@@ -132,7 +133,7 @@ private:
 
     void testAllExpectedParametersExist()
     {
-        beginTest("(a) All 21 expected parameter IDs exist, and nothing extra");
+        beginTest("(a) All 36 expected parameter IDs exist, and nothing extra");
 
         DOOFAudioProcessor processor;
 
@@ -144,9 +145,15 @@ private:
             expected.add("layer" + n + ".level");
             expected.add("layer" + n + ".mute");
             expected.add("layer" + n + ".solo");
+
+            // Phase 5. Spelled out here for the same reason as the four above: a test that asked
+            // ParamIDs for the string would follow a rename along and never notice.
+            expected.add("layer" + n + ".click.type");
+            expected.add("layer" + n + ".click.tone");
+            expected.add("layer" + n + ".click.decay");
         }
 
-        expectEquals(expected.size(), 21, "1 master gain + 5 layers x 4 controls");
+        expectEquals(expected.size(), 36, "1 master gain + 5 layers x (4 mixer + 3 click) controls");
 
         for (const auto& id : expected)
             expect(processor.apvts.getParameter(id) != nullptr,
@@ -187,6 +194,58 @@ private:
             expectWithinAbsoluteError(raw("layer" + n + ".level"), 1.0f, 1.0e-6f);
             expectWithinAbsoluteError(raw("layer" + n + ".mute"),  0.0f, 1.0e-6f);
             expectWithinAbsoluteError(raw("layer" + n + ".solo"),  0.0f, 1.0e-6f);
+        }
+    }
+
+    // (c) The click parameters' contract, which is what every future preset is stored against.
+    // The choice list in particular: it is permanently eight entries, because a Choice's entry
+    // list is part of its range and growing it later would silently change what a stored value
+    // means. Asserting the count here is what stops Step 4 from "just adding a slot".
+    void testClickDefaultsAndRanges()
+    {
+        beginTest("(c) Click parameters: fixed 8-entry type list, tone 0-1, skewed decay range");
+
+        DOOFAudioProcessor processor;
+
+        for (int i = 1; i <= kExpectedLayers; ++i)
+        {
+            const auto n = juce::String(i);
+
+            auto* type = dynamic_cast<juce::AudioParameterChoice*>(
+                processor.apvts.getParameter("layer" + n + ".click.type"));
+
+            expect(type != nullptr, "layer" + n + ".click.type is not a Choice parameter");
+            if (type == nullptr)
+                return;
+
+            expectEquals(type->choices.size(), 8,
+                         "layer" + n + ".click.type must stay at 8 entries — 4 synth types plus 4 "
+                         "permanently reserved sample slots");
+            expectEquals(type->getIndex(), (int) ParamIDs::ClickType::tick,
+                         "layer" + n + ".click.type should default to Tick");
+
+            auto* tone = dynamic_cast<juce::AudioParameterFloat*>(
+                processor.apvts.getParameter("layer" + n + ".click.tone"));
+            auto* decay = dynamic_cast<juce::AudioParameterFloat*>(
+                processor.apvts.getParameter("layer" + n + ".click.decay"));
+
+            expect(tone != nullptr && decay != nullptr,
+                   "layer" + n + "'s click tone/decay are not float parameters");
+            if (tone == nullptr || decay == nullptr)
+                return;
+
+            expectWithinAbsoluteError(tone->range.start, 0.0f, 1.0e-6f);
+            expectWithinAbsoluteError(tone->range.end,   1.0f, 1.0e-6f);
+            expectWithinAbsoluteError(tone->get(),       0.5f, 1.0e-6f);
+
+            expectWithinAbsoluteError(decay->range.start, ParamIDs::clickDecayMinSeconds, 1.0e-9f);
+            expectWithinAbsoluteError(decay->range.end,   ParamIDs::clickDecayMaxSeconds, 1.0e-9f);
+            expectWithinAbsoluteError(decay->get(), ParamIDs::clickDecayDefaultSeconds, 1.0e-9f);
+
+            // The skew is the point of the range, so it is asserted rather than assumed: half
+            // travel must land on the default, not on the arithmetic midpoint of 1 and 50 ms.
+            const float atHalfTravel = decay->range.convertFrom0to1(0.5f);
+            expectWithinAbsoluteError(atHalfTravel, ParamIDs::clickDecayDefaultSeconds, 1.0e-4f);
         }
     }
 };
@@ -744,12 +803,26 @@ private:
         const double pitches[] { 90.0, 140.0, 200.0, 250.0, 300.0 };
         const double lengths[] { 0.20, 0.25, 0.30, 0.35, 0.40 };
 
+        // Phase 5's click controls ride along here rather than in a test of their own, precisely
+        // because the claim being made about them is that they need no special handling: they are
+        // ordinary APVTS parameters, so apvts.copyState() already carries them and the state
+        // schema stays at version 3. That claim is worth nothing until a preset actually
+        // round-trips them. A sample slot is included among the types so a value the engine has
+        // no content for still survives the trip intact.
+        const int clickTypes[] { 0, 1, 2, 3, 7 };
+        const float clickTones[]  { 0.1f, 0.3f, 0.5f, 0.7f, 0.9f };
+        const float clickDecays[] { 0.002f, 0.005f, 0.012f, 0.020f, 0.040f };
+
         for (int i = 0; i < processor.getNumLayers(); ++i)
         {
             setParamValue(processor, layerId(i, "type"),  (float) types[i]);
             setParamValue(processor, layerId(i, "level"), levels[i]);
             setParamValue(processor, layerId(i, "mute"),  mutes[i]);
             setParamValue(processor, layerId(i, "solo"),  solos[i]);
+
+            setParamValue(processor, layerId(i, "click.type"),  (float) clickTypes[i]);
+            setParamValue(processor, layerId(i, "click.tone"),  clickTones[i]);
+            setParamValue(processor, layerId(i, "click.decay"), clickDecays[i]);
 
             processor.getLayer(i).pitchModel.moveNode(0, 0.0, pitches[i]);
             processor.getLayer(i).ampModel.setLength(lengths[i]);
@@ -768,6 +841,10 @@ private:
             setParamValue(processor, layerId(i, "level"), 0.0f);
             setParamValue(processor, layerId(i, "mute"),  1.0f);
             setParamValue(processor, layerId(i, "solo"),  1.0f);
+
+            setParamValue(processor, layerId(i, "click.type"),  (float) (int) ParamIDs::ClickType::sample3);
+            setParamValue(processor, layerId(i, "click.tone"),  0.05f);
+            setParamValue(processor, layerId(i, "click.decay"), 0.033f);
 
             processor.getLayer(i).pitchModel.moveNode(0, 0.0, 777.0);
             processor.getLayer(i).ampModel.setLength(1.9);
@@ -790,6 +867,15 @@ private:
                                        "mute did not survive the round trip" + where);
             expectWithinAbsoluteError(rawParam(processor, layerId(i, "solo")),  solos[i], 1.0e-6f,
                                        "solo did not survive the round trip" + where);
+
+            // Looser than the others: the decay range is skewed, so its value goes through a pow()
+            // in each direction and comes back within float precision rather than exactly.
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "click.type")), (float) clickTypes[i], 1.0e-6f,
+                                       "click type did not survive the round trip" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "click.tone")), clickTones[i], 1.0e-6f,
+                                       "click tone did not survive the round trip" + where);
+            expectWithinAbsoluteError(rawParam(processor, layerId(i, "click.decay")), clickDecays[i], 1.0e-5f,
+                                       "click decay did not survive the round trip" + where);
 
             expectWithinAbsoluteError(processor.getLayer(i).pitchModel.getNode(0).value, pitches[i], 1.0e-6,
                                        "pitch envelope did not survive the round trip" + where);

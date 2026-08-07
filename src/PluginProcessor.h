@@ -86,6 +86,11 @@ private:
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
+    // The skewed seconds range shared by every layer's click.decay parameter. A function rather
+    // than a constant because NormalisableRange's skew is set after construction; public-adjacent
+    // callers (the Phase 5 panel, tests) go through the parameter itself, so this stays private.
+    static juce::NormalisableRange<float> clickDecayRange();
+
     // Renders and mixes one contiguous span of the current block: every layer's voice ticked and
     // summed through its smoothed gain, then master gain and the DC blocker, written to L+R.
     // processBlock calls this once per gap between MIDI events, which is what makes note-on
