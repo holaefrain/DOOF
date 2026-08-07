@@ -38,6 +38,7 @@ target_sources(DOOF
         src/PluginEditor.cpp      # GUI root + JUCE AudioProcessorEditor boilerplate
         src/EnvelopeCanvas.cpp    # central canvas: pitch+amp curve rendering (§3.4)
         src/SubVoice.cpp          # mono sine voice: oscillator, envelopes, choke state machine
+        src/ClickVoice.cpp        # synthesised click transient: tick/noise/snap/thump + tone filter
         src/EnvelopeModel.cpp     # node-based envelope data model (ValueTree + undo)
         src/BezierSegment.cpp     # single-segment cubic Bezier math (time -> value)
         src/EnvelopeEvaluator.cpp # precomputes an EnvelopeModel into a lookup table
@@ -83,6 +84,7 @@ target_sources(DOOFTests
     PRIVATE
         tests/BasicTests.cpp   # Phase 0/1/2 verify tests
         src/SubVoice.cpp       # voice engine under test (juce_core only, no audio_utils)
+        src/ClickVoice.cpp     # click transient under test (juce_core only, same lean constraint)
         src/EnvelopeModel.cpp  # envelope data model under test (juce_data_structures)
         src/BezierSegment.cpp  # Bezier segment math under test (no JUCE dependency)
         src/EnvelopeEvaluator.cpp # lookup-table builder under test
@@ -129,6 +131,7 @@ target_sources(DOOFIntegrationTests
         src/PluginEditor.cpp
         src/EnvelopeCanvas.cpp
         src/SubVoice.cpp
+        src/ClickVoice.cpp
         src/EnvelopeModel.cpp
         src/BezierSegment.cpp
         src/EnvelopeEvaluator.cpp
