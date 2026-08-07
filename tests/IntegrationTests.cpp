@@ -7,6 +7,7 @@
 #include "PluginEditor.h"
 
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -1803,8 +1804,143 @@ private:
 
 static Phase4ContextualPanelTest phase4ContextualPanelTest;
 
+// Phase5MidiDispatchTest — Phase 5 §6 Verify: "Render and assert the click onset is sample-aligned
+// to note-on." Pins the sample-accurate dispatch added in Step 1a, which replaced a loop that
+// drained the whole MidiBuffer before rendering anything and so fired every note-on at sample 0 —
+// up to 11 ms early on a 512-sample block. Inaudible on the sub's slow attack, which is how it
+// survived four phases; audible timing slop on a click transient.
+//
+// Deliberately not phrased as "the first non-zero sample is at N". SubVoice::startBody sets
+// phase = 0, so sin(0) = 0 makes the sample at the note-on itself exactly zero and the first
+// audible one land at N+1 — an assertion on the first non-zero index would encode that off-by-one
+// and would break the moment a click type starts on a non-zero sample. The two halves asserted
+// here say the same thing exactly and without depending on any voice's starting waveform:
+//   1. every sample before the event is exactly zero, and
+//   2. from the event onward the render is bit-identical to the same note taken at sample 0.
+class Phase5MidiDispatchTest : public juce::UnitTest
+{
+public:
+    Phase5MidiDispatchTest() : juce::UnitTest("Phase5MidiDispatch") {}
 
+    void runTest() override
+    {
+        testNoteOnSoundsAtItsSamplePosition();
+        testLaterEventDoesNotReachBackwards();
+    }
 
+private:
+    static constexpr double kSampleRate = 44100.0;
+    static constexpr int kBlockSize = 512;
+    static constexpr int kTail = 4096;
+
+    // Renders `totalSamples` of the default patch in kBlockSize blocks, placing a note-on at the
+    // given absolute sample offset. prepareToPlay is called per render, so the voices start Idle
+    // and the gain smoothers sit on their targets — a ramp in one render but not another would
+    // show up as a mismatch that has nothing to do with dispatch timing.
+    static std::vector<float> renderWithNoteAt(int offset, int totalSamples)
+    {
+        DOOFAudioProcessor processor;
+        processor.prepareToPlay(kSampleRate, kBlockSize);
+
+        std::vector<float> out;
+        out.reserve((size_t) totalSamples);
+
+        juce::AudioBuffer<float> buffer(2, kBlockSize);
+        for (int blockStart = 0; blockStart < totalSamples; blockStart += kBlockSize)
+        {
+            juce::MidiBuffer midi;
+            if (offset >= blockStart && offset < blockStart + kBlockSize)
+                midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), offset - blockStart);
+
+            processor.processBlock(buffer, midi);
+
+            const auto* channel = buffer.getReadPointer(0);
+            for (int i = 0; i < kBlockSize; ++i)
+                out.push_back(channel[i]);
+        }
+
+        return out;
+    }
+
+    // First index at which the two spans differ bit-for-bit, or -1 if they are identical.
+    // Compared as raw bytes because bit-identical is the actual claim, and it also keeps the
+    // compiler's float-equality warning out of the build.
+    static int firstDifference(const float* a, const float* b, int count)
+    {
+        for (int i = 0; i < count; ++i)
+            if (std::memcmp(a + i, b + i, sizeof(float)) != 0)
+                return i;
+
+        return -1;
+    }
+
+    // The core check: a note-on at sample N is silent before N and, from N onward, produces
+    // exactly the render it would have produced had it arrived at sample 0.
+    void testNoteOnSoundsAtItsSamplePosition()
+    {
+        beginTest("A note-on at sample N sounds at sample N, not at the start of the block");
+
+        const auto reference = renderWithNoteAt(0, kTail);
+
+        // 1 and 511 sit at the extremes of a block; 37 and 128 are ordinary interior positions.
+        // 1 is included even though it can only prove one sample of silence, because it is the
+        // offset most likely to be lost to an off-by-one in the cursor arithmetic.
+        for (const int offset : { 1, 37, 128, 511 })
+        {
+            const auto shifted = renderWithNoteAt(offset, kTail + kBlockSize);
+
+            const std::vector<float> silence((size_t) offset, 0.0f);
+            const int soundedEarly = firstDifference(shifted.data(), silence.data(), offset);
+            expect(soundedEarly < 0,
+                   "Note-on at sample " + juce::String(offset) + " produced output at sample "
+                       + juce::String(soundedEarly) + ", before the event");
+
+            const int diverged = firstDifference(shifted.data() + offset, reference.data(), kTail);
+            expect(diverged < 0,
+                   "Note-on at sample " + juce::String(offset)
+                       + " does not render identically to the same note at sample 0; they first "
+                         "differ "
+                       + juce::String(diverged) + " samples after the note-on");
+        }
+    }
+
+    // A second event later in the same block must not disturb what was already rendered before it.
+    // Under the old drain-the-buffer-first dispatch both note-ons landed on sample 0, so the first
+    // note never sounded at all: the second arrived while the voice was still at envTime 0 and
+    // choked it immediately. Rendering in spans is what makes the first note's span independent.
+    void testLaterEventDoesNotReachBackwards()
+    {
+        beginTest("A second note-on later in the block leaves the samples before it untouched");
+
+        const auto single = renderWithNoteAt(0, kTail);
+
+        for (const int secondOffset : { 64, 300 })
+        {
+            DOOFAudioProcessor processor;
+            processor.prepareToPlay(kSampleRate, kBlockSize);
+
+            juce::AudioBuffer<float> buffer(2, kBlockSize);
+            juce::MidiBuffer midi;
+            midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+            midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), secondOffset);
+            processor.processBlock(buffer, midi);
+
+            const int diverged = firstDifference(buffer.getReadPointer(0), single.data(), secondOffset);
+            expect(diverged < 0,
+                   "A note-on at sample " + juce::String(secondOffset)
+                       + " changed sample " + juce::String(diverged)
+                       + ", which was rendered before it arrived");
+
+            // Without this the test above would still pass on a buffer that had gone silent, which
+            // is exactly the failure the old dispatch produced.
+            expect(single[(size_t) secondOffset / 2] != 0.0f,
+                   "The first note is silent halfway to the second event, so the check above is "
+                   "comparing silence against silence and proving nothing");
+        }
+    }
+};
+
+static Phase5MidiDispatchTest phase5MidiDispatchTest;
 
 
 
