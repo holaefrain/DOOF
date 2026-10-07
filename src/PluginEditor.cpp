@@ -11,6 +11,7 @@ const char* const DOOFAudioProcessorEditor::placeholderID = "contextualPlacehold
 
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
+      clickPanel(p.apvts, p.getClickSamples()),
       envelopeCanvas(p.getLayer(0).pitchModel, juce::Range<double>(20.0, 220.0),
                      p.getLayer(0).ampModel,   juce::Range<double>(0.0, 1.0),
                      juce::jmax(p.getLayer(0).pitchModel.getLength(), p.getLayer(0).ampModel.getLength()), p)
@@ -145,6 +146,7 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     contextualPlaceholder.setJustificationType(juce::Justification::centred);
     contextualPlaceholder.setColour(juce::Label::textColourId, juce::Colours::grey);
     addChildComponent(contextualPlaceholder); // added but not shown; the panel decides
+    addChildComponent(clickPanel);            // likewise
 
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
@@ -225,9 +227,10 @@ void DOOFAudioProcessorEditor::resized()
         layerStrips[i]->setBounds(isLast ? layerBar : layerBar.removeFromLeft(cellWidth));
     }
 
-    // Both occupy the same space; refreshContextualPanel decides which one is visible.
+    // All three occupy the same space; refreshContextualPanel decides which one is visible.
     envelopeCanvas.setBounds(bounds);
     contextualPlaceholder.setBounds(bounds);
+    clickPanel.setBounds(bounds);
 }
 
 void DOOFAudioProcessorEditor::applyViewPrefsToUI()
@@ -259,9 +262,10 @@ void DOOFAudioProcessorEditor::refreshContextualPanel()
     lastShownLayer = selectedLayer;
     lastShownType  = type;
 
-    // Only Sub has anything to edit today. Click gets its own panel in Phase 5; Off has nothing
-    // to show by definition.
-    const bool isSub = (type == (int) ParamIDs::LayerType::sub);
+    // Sub edits curves on the canvas, Click gets its own panel, and Off has nothing to show by
+    // definition.
+    const bool isSub   = (type == (int) ParamIDs::LayerType::sub);
+    const bool isClick = (type == (int) ParamIDs::LayerType::click);
 
     envelopeCanvas.setVisible(isSub);
 
@@ -275,17 +279,25 @@ void DOOFAudioProcessorEditor::refreshContextualPanel()
     ampLengthCaption.setVisible(isSub);
     ampLengthValue.setVisible(isSub);
 
-    contextualPlaceholder.setVisible(! isSub);
-    if (! isSub)
-        contextualPlaceholder.setText(type == (int) ParamIDs::LayerType::click
-                                        ? "Click layer - arriving in Phase 5"
-                                        : "Layer off",
-                                       juce::dontSendNotification);
+    // Re-pointed before it is shown, so it never appears for a frame still driving the previous
+    // layer. setLayer is a no-op when the layer has not changed.
+    if (isClick)
+        clickPanel.setLayer(selectedLayer);
+    clickPanel.setVisible(isClick);
+
+    contextualPlaceholder.setVisible(! isSub && ! isClick);
+    if (! isSub && ! isClick)
+        contextualPlaceholder.setText("Layer off", juce::dontSendNotification);
 }
 
 void DOOFAudioProcessorEditor::timerCallback()
 {
     refreshContextualPanel();
+
+    // The click type can move under automation or a preset load with no gesture here. The combo
+    // box follows through its attachment, but the panel's status line needs telling.
+    if (clickPanel.isVisible())
+        clickPanel.refreshStatus();
 }
 
 void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)

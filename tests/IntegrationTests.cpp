@@ -5,6 +5,7 @@
 #include "LayerStrip.h"
 #include "EnvelopeCanvas.h"
 #include "PluginEditor.h"
+#include "ClickPanel.h"
 
 #include <cmath>
 #include <cstring>
@@ -1693,7 +1694,7 @@ private:
 
     void testPanelFollowsTheSelectedLayersType()
     {
-        beginTest("(a) Sub shows the canvas; Click and Off replace it with a placeholder");
+        beginTest("(a) Sub shows the canvas, Click the click panel, Off a placeholder");
 
         Editor e;
         setParamValue(e.processor, "layer2.type", (float) (int) ParamIDs::LayerType::click);
@@ -1708,15 +1709,23 @@ private:
         expect(e.canvas->isVisible(), "The canvas is hidden for a Sub layer");
         expect(! e.placeholder->isVisible(), "The placeholder is showing over a Sub layer");
 
+        // Phase 5 replaced the Click placeholder with a real panel.
+        auto* clickPanel = e.editor->findChildWithID(ClickPanel::panelID);
+        expect(clickPanel != nullptr, "Editor has no click panel");
+        if (clickPanel == nullptr)
+            return;
+
+        expect(! clickPanel->isVisible(), "The click panel is showing over a Sub layer");
+
         clickStrip(e, 1);
         expect(! e.canvas->isVisible(), "The canvas is still showing for a Click layer");
-        expect(e.placeholder->isVisible(), "No placeholder for a Click layer");
-        expect(e.placeholder->getText().containsIgnoreCase("click"),
-               "The Click placeholder does not mention the layer type, it says: "
-                 + e.placeholder->getText());
+        expect(clickPanel->isVisible(), "No click panel for a Click layer");
+        expect(! e.placeholder->isVisible(), "The placeholder is showing over the click panel");
 
         clickStrip(e, 2);
         expect(! e.canvas->isVisible(), "The canvas is still showing for an Off layer");
+        expect(! clickPanel->isVisible(), "The click panel is still showing for an Off layer");
+        expect(e.placeholder->isVisible(), "No placeholder for an Off layer");
         expect(e.placeholder->getText().containsIgnoreCase("off"),
                "The Off placeholder does not say the layer is off, it says: "
                  + e.placeholder->getText());
@@ -2719,6 +2728,311 @@ private:
 };
 
 static Phase5ClickSampleEngineTest phase5ClickSampleEngineTest;
+
+// Phase5ClickPanelTest — the Click layer's contextual panel.
+//   (a) Its controls drive the selected layer's parameters and no other layer's.
+//   (b) Selecting another Click layer re-points every control at that layer.
+//   (c) Automation moves the controls with no gesture in the panel.
+//   (d) The type list names each sample slot's file, or says it is empty.
+//   (e) The status line and Decay's enabled state follow the type, including under automation.
+//   (f) Decay is shown and typed in milliseconds, Tone and Level in percent; storage is unchanged.
+class Phase5ClickPanelTest : public juce::UnitTest
+{
+public:
+    Phase5ClickPanelTest() : juce::UnitTest("Phase5ClickPanel") {}
+
+    void runTest() override
+    {
+        testControlsDriveOnlyTheSelectedLayer();
+        testSelectingAnotherLayerRepointsTheControls();
+        testAutomationMovesTheControls();
+        testTypeListNamesTheSampleSlots();
+        testStatusFollowsTheType();
+        testDecayIsShownInMilliseconds();
+    }
+
+private:
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    static float paramValue(DOOFAudioProcessor& processor, const juce::String& id)
+    {
+        return processor.apvts.getRawParameterValue(id)->load();
+    }
+
+    struct Editor
+    {
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> editor;
+        juce::Component* panel = nullptr;
+        juce::ComboBox* type = nullptr;
+        juce::Slider* tone = nullptr;
+        juce::Slider* decay = nullptr;
+        juce::Slider* level = nullptr;
+        juce::Label* status = nullptr;
+        juce::Array<LayerStrip*> strips;
+
+        bool complete() const
+        {
+            return panel != nullptr && type != nullptr && tone != nullptr && decay != nullptr
+                && level != nullptr && status != nullptr && strips.size() == 5;
+        }
+    };
+
+    // Layers 2 and 4 are made Click before the editor opens, since it reads the state it is built
+    // against. Callers set anything else they need first.
+    static void open(Editor& e)
+    {
+        for (const int i : { 1, 3 })
+            setParamValue(e.processor, ParamIDs::layerType(i), (float) (int) ParamIDs::LayerType::click);
+
+        e.editor.reset(e.processor.createEditor());
+        e.editor->setBounds(0, 0, 800, 600);
+
+        for (auto* child : e.editor->getChildren())
+            if (auto* strip = dynamic_cast<LayerStrip*>(child))
+                e.strips.add(strip);
+
+        e.panel = e.editor->findChildWithID(ClickPanel::panelID);
+        if (e.panel == nullptr)
+            return;
+
+        e.type   = dynamic_cast<juce::ComboBox*>(e.panel->findChildWithID(ClickPanel::typeBoxID));
+        e.tone   = dynamic_cast<juce::Slider*>  (e.panel->findChildWithID(ClickPanel::toneSliderID));
+        e.decay  = dynamic_cast<juce::Slider*>  (e.panel->findChildWithID(ClickPanel::decaySliderID));
+        e.level  = dynamic_cast<juce::Slider*>  (e.panel->findChildWithID(ClickPanel::levelSliderID));
+        e.status = dynamic_cast<juce::Label*>   (e.panel->findChildWithID(ClickPanel::statusLabelID));
+    }
+
+    static void clickStrip(Editor& e, int index)
+    {
+        auto* strip = e.strips[index];
+        strip->mouseDown(juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), {},
+                                           juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                           strip, strip, juce::Time::getCurrentTime(), {},
+                                           juce::Time::getCurrentTime(), 1, false));
+    }
+
+    // (a) The hazard is the attachment being bound to the wrong layer's ID - most likely layer 1,
+    // where the panel's attachments would land if setLayer were never called.
+    void testControlsDriveOnlyTheSelectedLayer()
+    {
+        beginTest("(a) The panel's controls drive the selected layer and no other");
+
+        Editor e;
+        open(e);
+        expect(e.complete(), "Editor is missing the click panel, one of its controls, or the strips");
+        if (! e.complete())
+            return;
+
+        clickStrip(e, 1);
+        expect(e.panel->isVisible(), "The click panel is not showing for Click layer 2");
+
+        const auto toneBefore4 = paramValue(e.processor, ParamIDs::layerClickTone(3));
+        const auto typeBefore4 = paramValue(e.processor, ParamIDs::layerClickType(3));
+
+        e.tone->setValue(0.9, juce::sendNotificationSync);
+        e.type->setSelectedItemIndex((int) ParamIDs::ClickType::snap, juce::sendNotificationSync);
+        e.level->setValue(0.25, juce::sendNotificationSync);
+
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerClickTone(1)), 0.9f, 1.0e-4f,
+                                  "The Tone knob did not reach layer 2");
+        expectEquals((int) paramValue(e.processor, ParamIDs::layerClickType(1)),
+                     (int) ParamIDs::ClickType::snap, "The type list did not reach layer 2");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerLevel(1)), 0.25f, 1.0e-4f,
+                                  "The Level knob did not reach layer 2");
+
+        expectEquals(paramValue(e.processor, ParamIDs::layerClickTone(3)), toneBefore4,
+                     "Layer 2's Tone knob also moved layer 4");
+        expectEquals(paramValue(e.processor, ParamIDs::layerClickType(3)), typeBefore4,
+                     "Layer 2's type list also moved layer 4");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerClickTone(0)), 0.5f, 1.0e-4f,
+                                  "Layer 2's Tone knob also moved layer 1");
+    }
+
+    // (b) Both directions: the controls must show the incoming layer's values, and the outgoing
+    // attachments must be gone, so the next edit cannot reach back into the previous layer.
+    void testSelectingAnotherLayerRepointsTheControls()
+    {
+        beginTest("(b) Selecting another Click layer re-points every control at it");
+
+        Editor e;
+        setParamValue(e.processor, ParamIDs::layerClickTone(3),  0.2f);
+        setParamValue(e.processor, ParamIDs::layerClickDecay(3), 0.03f);
+        setParamValue(e.processor, ParamIDs::layerClickType(3),  (float) (int) ParamIDs::ClickType::thump);
+        setParamValue(e.processor, ParamIDs::layerLevel(3),      0.6f);
+        open(e);
+        if (! e.complete())
+            return;
+
+        clickStrip(e, 1);
+        e.tone->setValue(0.8, juce::sendNotificationSync);
+
+        clickStrip(e, 3);
+        expectWithinAbsoluteError((float) e.tone->getValue(), 0.2f, 1.0e-4f,
+                                  "The Tone knob still shows layer 2 after selecting layer 4");
+        expectWithinAbsoluteError((float) e.decay->getValue(), 0.03f, 1.0e-4f,
+                                  "The Decay knob does not show layer 4's decay");
+        expectEquals(e.type->getSelectedItemIndex(), (int) ParamIDs::ClickType::thump,
+                     "The type list does not show layer 4's type");
+        expectWithinAbsoluteError((float) e.level->getValue(), 0.6f, 1.0e-4f,
+                                  "The Level knob does not show layer 4's level");
+
+        e.tone->setValue(0.4, juce::sendNotificationSync);
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerClickTone(3)), 0.4f, 1.0e-4f,
+                                  "After switching, the Tone knob does not drive layer 4");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerClickTone(1)), 0.8f, 1.0e-4f,
+                                  "Editing layer 4 reached back into layer 2");
+    }
+
+    // (c) Attachments do this, but only if they are bound to the right parameter - a panel showing
+    // a stale value under automation would read as the automation not working.
+    void testAutomationMovesTheControls()
+    {
+        beginTest("(c) Automation moves the panel's controls");
+
+        Editor e;
+        open(e);
+        if (! e.complete())
+            return;
+
+        clickStrip(e, 1);
+        setParamValue(e.processor, ParamIDs::layerClickTone(1), 0.33f);
+        setParamValue(e.processor, ParamIDs::layerClickType(1), (float) (int) ParamIDs::ClickType::noise);
+
+        expectWithinAbsoluteError((float) e.tone->getValue(), 0.33f, 1.0e-4f,
+                                  "The Tone knob did not follow automation");
+        expectEquals(e.type->getSelectedItemIndex(), (int) ParamIDs::ClickType::noise,
+                     "The type list did not follow automation");
+    }
+
+    // (d) The choice's own "Sample N" is kept in front because that is what a preset stores; the
+    // file name is extra information, and "(empty)" explains a silent layer before it is played.
+    void testTypeListNamesTheSampleSlots()
+    {
+        beginTest("(d) The type list names each sample slot's file, or says it is empty");
+
+        Editor e;
+        const auto audio = ClickSampleFixtures::decayingTone(3000.0, 44100.0, 300);
+        expect(ClickSampleFixtures::load(e.processor.getClickSamples(), 1, audio, 44100.0, 32,
+                                         "2-rim.wav"),
+               "Setup load refused");
+        open(e);
+        if (! e.complete())
+            return;
+
+        const auto choices = ParamIDs::clickTypeChoices();
+        expectEquals(e.type->getNumItems(), choices.size(),
+                     "The type list does not have one entry per click.type choice");
+
+        for (int i = 0; i < e.type->getNumItems(); ++i)
+        {
+            const auto text = e.type->getItemText(i);
+            expect(text.startsWith(choices[i]),
+                   "Entry " + juce::String(i) + " reads \"" + text + "\", not the choice it stands for");
+
+            const int slot = i - ParamIDs::firstClickSampleSlot;
+            if (slot < 0)
+                continue;
+
+            if (e.processor.getClickSamples().slots()[slot].isLoaded())
+                expect(text.contains(e.processor.getClickSamples().nameOf(slot)),
+                       "Loaded slot " + juce::String(slot + 1) + " does not name its file: " + text);
+            else
+                expect(text.contains("empty"),
+                       "Empty slot " + juce::String(slot + 1) + " does not say so: " + text);
+        }
+
+        expect(e.type->getItemText(ParamIDs::firstClickSampleSlot + 1).contains("2-rim.wav"),
+               "The slot loaded for this test is not named in the list");
+    }
+
+    // (e) A user gesture updates the status at once; automation only through the editor's poll,
+    // which is what the dispatch loop is pumped for at the end.
+    void testStatusFollowsTheType()
+    {
+        beginTest("(e) The status line and Decay's enabled state follow the type");
+
+        Editor e;
+        const auto audio = ClickSampleFixtures::decayingTone(3000.0, 44100.0, 300);
+        ClickSampleFixtures::load(e.processor.getClickSamples(), 0, audio, 44100.0, 32, "1-kick.wav");
+        open(e);
+        if (! e.complete())
+            return;
+
+        clickStrip(e, 1);
+
+        e.type->setSelectedItemIndex((int) ParamIDs::ClickType::tick, juce::sendNotificationSync);
+        expect(e.status->getText().isEmpty(), "A synthesised type shows a status: " + e.status->getText());
+        expect(e.decay->isEnabled(), "Decay is disabled for a synthesised type, which it shapes");
+
+        e.type->setSelectedItemIndex((int) ParamIDs::ClickType::sample1, juce::sendNotificationSync);
+        expect(e.status->getText().contains("1-kick.wav"),
+               "A loaded slot's status does not name its file: " + e.status->getText());
+        expect(! e.decay->isEnabled(), "Decay is enabled for a sample, which it does not affect");
+
+        // Slot 4 is empty unless this build embeds four samples, in which case there is no empty
+        // slot to show and the remaining checks have nothing to measure.
+        if (e.processor.getClickSamples().slots()[3].isLoaded())
+            return;
+
+        e.type->setSelectedItemIndex((int) ParamIDs::ClickType::sample4, juce::sendNotificationSync);
+        expect(e.status->getText().containsIgnoreCase("empty")
+                   && e.status->getText().containsIgnoreCase("silent"),
+               "An empty slot does not say the layer is silent: " + e.status->getText());
+
+        // Automation back to a synthesised type. Nothing in the panel sees this directly.
+        setParamValue(e.processor, ParamIDs::layerClickType(1), (float) (int) ParamIDs::ClickType::snap);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+
+        expect(e.status->getText().isEmpty(),
+               "The status still reads \"" + e.status->getText() + "\" after automation moved the "
+               "type to Snap, so the poll never reached the panel");
+        expect(e.decay->isEnabled(), "Decay stayed disabled after automation moved off a sample slot");
+    }
+
+    // (f) The text conversion is installed after the attachment, which would otherwise overwrite it
+    // with the parameter's own seconds formatting - so it is checked through the live slider.
+    void testDecayIsShownInMilliseconds()
+    {
+        beginTest("(f) Decay is shown in milliseconds and Tone/Level in percent, stored unchanged");
+
+        Editor e;
+        open(e);
+        if (! e.complete())
+            return;
+
+        clickStrip(e, 1);
+
+        expectEquals(e.decay->getTextFromValue(0.008), juce::String("8.0 ms"),
+                     "Decay does not display in milliseconds");
+
+        for (const auto& typed : { juce::String("20"), juce::String("20 ms"), juce::String("20ms") })
+        {
+            e.decay->setValue(e.decay->getValueFromText(typed), juce::sendNotificationSync);
+            expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerClickDecay(1)), 0.020f,
+                                      1.0e-5f, "Typing \"" + typed + "\" did not store 20 ms");
+        }
+
+        // Tone and Level get the same treatment as a percentage, for the same reason.
+        expectEquals(e.tone->getTextFromValue(0.5), juce::String("50%"), "Tone does not display as a percentage");
+        e.level->setValue(e.level->getValueFromText("40%"), juce::sendNotificationSync);
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerLevel(1)), 0.4f, 1.0e-5f,
+                                  "Typing 40% into Level did not store 0.4");
+
+        // Past the 50 ms ceiling: the slider clamps rather than storing an out-of-range value.
+        e.decay->setValue(e.decay->getValueFromText("500"), juce::sendNotificationSync);
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerClickDecay(1)),
+                                  ParamIDs::clickDecayMaxSeconds, 1.0e-5f,
+                                  "Typing 500 ms was not clamped to the decay ceiling");
+    }
+};
+
+static Phase5ClickPanelTest phase5ClickPanelTest;
 
 
 

@@ -2,6 +2,7 @@
 #include "PluginProcessor.h"
 #include "EnvelopeCanvas.h"
 #include "LayerStrip.h"
+#include "ClickPanel.h"
 #include <array>
 #include <memory>
 
@@ -93,10 +94,14 @@ private:
     // Every layer's type parameter, resolved once so the poll does no string lookups.
     std::array<std::atomic<float>*, LayerAudibility::kNumLayers> layerTypeParams { };
 
-    // Stands in for the canvas when the selected layer has nothing to edit yet - a Click layer
-    // (Phase 5) or one switched Off. Occupies the canvas's bounds so the swap reads as the panel
-    // changing rather than as the window emptying.
+    // Stands in for the canvas when the selected layer has nothing to edit - one switched Off.
+    // Occupies the canvas's bounds so the swap reads as the panel changing rather than as the
+    // window emptying.
     juce::Label contextualPlaceholder;
+
+    // The Click layer's controls (Phase 5), shown in the canvas's place when the selected layer is
+    // a Click. One panel re-pointed at whichever layer is selected, like the canvas.
+    ClickPanel clickPanel;
 
     // The central canvas (§3.4): pitch + amp curves overlaid on one time axis.
     // Declared after audioProcessor since its constructor reads model

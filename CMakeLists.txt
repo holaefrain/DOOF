@@ -88,6 +88,7 @@ target_sources(DOOF
         src/DefaultEnvelopes.cpp  # out-of-the-box pitch/amp envelope shapes
         src/LayerAudibility.cpp   # §3.3 mute/solo audibility rule, shared by engine + GUI
         src/LayerStrip.cpp        # one cell of the horizontal layer selector (§4.3)
+        src/ClickPanel.cpp        # contextual panel for a Click layer: type, tone, decay, level
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -185,6 +186,7 @@ target_sources(DOOFIntegrationTests
         src/DefaultEnvelopes.cpp
         src/LayerAudibility.cpp
         src/LayerStrip.cpp
+        src/ClickPanel.cpp
 )
 
 target_include_directories(DOOFIntegrationTests PRIVATE src)
