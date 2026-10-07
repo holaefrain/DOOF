@@ -7,6 +7,7 @@
 #include "DefaultEnvelopes.h"
 #include "LayerAudibility.h"
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -1408,6 +1409,392 @@ private:
 };
 
 static Phase5ClickVoiceTest phase5ClickVoiceTest;
+
+// Phase5ClickSamplePlaybackTest — ClickVoice playing a decoded sample slot rather than a
+// synthesised type.
+//   (a) hasContentFor answers per slot: synthesised types always, sample slots only when loaded.
+//   (b) A sample sounds on its trigger sample and plays to its own end, then exact silence.
+//   (c) The decay control does not truncate a sample.
+//   (d) Rate conversion keeps a sample's pitch and length in both directions.
+//   (e) The rate conversion interpolates linearly rather than dropping or repeating samples.
+//   (f) Tone is a plain low-pass on a sample: it darkens, and it keeps the low end.
+//   (g) An outgoing sample ramps out across a retrigger instead of being cut.
+//
+// Built from hand-made ClickSample structs rather than decoded WAVs. That is the whole point of
+// ClickSample being a bare pointer + length: the playback path stays testable in this lean target,
+// and decoding is ClickSampleLibraryTest's job in the integration target.
+class Phase5ClickSamplePlaybackTest : public juce::UnitTest
+{
+public:
+    Phase5ClickSamplePlaybackTest() : juce::UnitTest("Phase5ClickSamplePlayback") {}
+
+    void runTest() override
+    {
+        testHasContentForEachSlot();
+        testPlaysFromTriggerToItsOwnEnd();
+        testDecayDoesNotTruncateASample();
+        testRateConversionKeepsPitchAndLength();
+        testRateConversionInterpolatesLinearly();
+        testToneIsAPlainLowPass();
+        testRetriggerRampsOutAnOutgoingSample();
+    }
+
+private:
+    static constexpr double kSampleRate = 44100.0;
+
+    // The choice index of Sample 1, written out from ClickVoice's own constants so this file needs
+    // nothing from ParamIDs.h (which the lean target does not need to pull in).
+    static constexpr int kFirstSampleSlot = ClickVoice::kNumTypes;
+
+    // Four slots with the given content in the first and the rest empty — the layout
+    // ClickSampleLibrary hands every voice. Points into `data`, which must outlive the result.
+    static std::array<ClickSample, ClickVoice::kNumSampleSlots>
+        slotsWith(const std::vector<float>& data, double sourceRate)
+    {
+        std::array<ClickSample, ClickVoice::kNumSampleSlots> slots {};
+        slots[0].data = data.data();
+        slots[0].numSamples = (int) data.size();
+        slots[0].sourceSampleRate = sourceRate;
+        return slots;
+    }
+
+    // Renders one hit of Sample 1 from a freshly prepared voice, triggered at sample 0.
+    static std::vector<float> render(const std::vector<float>& data, double sourceRate,
+                                     double deviceRate, int numSamples,
+                                     float tone = 1.0f, double decaySeconds = 0.008)
+    {
+        const auto slots = slotsWith(data, sourceRate);
+
+        ClickVoice voice;
+        voice.prepare(deviceRate);
+        voice.setSampleSlots(slots.data());
+        voice.setSlot(kFirstSampleSlot);
+        voice.setTone(tone);
+        voice.setDecaySeconds(decaySeconds);
+        voice.noteOn(60);
+
+        std::vector<float> out((std::size_t) numSamples, 0.0f);
+        for (int i = 0; i < numSamples; ++i)
+            out[(std::size_t) i] = voice.processSample();
+
+        return out;
+    }
+
+    // Index of the last non-zero sample, or -1 for a render that is silent throughout.
+    static int lastSounding(const std::vector<float>& buf)
+    {
+        for (int i = (int) buf.size() - 1; i >= 0; --i)
+            if (buf[(std::size_t) i] != 0.0f)
+                return i;
+
+        return -1;
+    }
+
+    static std::vector<float> sine(double freqHz, double rate, int numSamples, double phase = 0.0)
+    {
+        std::vector<float> out((std::size_t) numSamples);
+        for (int i = 0; i < numSamples; ++i)
+            out[(std::size_t) i] = (float) std::sin(phase + juce::MathConstants<double>::twoPi
+                                                                * freqHz * i / rate);
+        return out;
+    }
+
+    // (a) The processor decides between mixing the click voice and mixing silence by asking this,
+    // so a wrong answer is either an empty slot falling back to some other sound or a loaded one
+    // never being heard.
+    void testHasContentForEachSlot()
+    {
+        beginTest("(a) hasContentFor: synthesised types always, sample slots only when loaded");
+
+        ClickVoice noSamples;
+        noSamples.prepare(kSampleRate);
+
+        for (int slot = 0; slot < ClickVoice::kNumSlots; ++slot)
+            expect(noSamples.hasContentFor(slot) == (slot < ClickVoice::kNumTypes),
+                   "With no samples at all, slot " + juce::String(slot) + " reports the wrong "
+                       "content");
+
+        const std::vector<float> data(64, 0.5f);
+        auto slots = slotsWith(data, kSampleRate);
+
+        // One sample long is not loadable: interpolation needs a next sample to read toward, and
+        // isLoaded() says so. A slot holding one must read as empty, not as playable.
+        slots[2].data = data.data();
+        slots[2].numSamples = 1;
+        slots[2].sourceSampleRate = kSampleRate;
+
+        ClickVoice voice;
+        voice.prepare(kSampleRate);
+        voice.setSampleSlots(slots.data());
+
+        const bool expected[ClickVoice::kNumSlots] { true, true, true, true, true, false, false, false };
+        for (int slot = 0; slot < ClickVoice::kNumSlots; ++slot)
+            expect(voice.hasContentFor(slot) == expected[slot],
+                   "Slot " + juce::String(slot) + " reports content "
+                       + (voice.hasContentFor(slot) ? "present" : "absent")
+                       + " with only Sample 1 loaded");
+
+        // Off either end of the choice list. The processor never sends these, but a bad index must
+        // read as nothing to play rather than reaching past the slot array.
+        expect(! voice.hasContentFor(-1), "Index -1 reports content");
+        expect(! voice.hasContentFor(ClickVoice::kNumSlots), "Index past the last slot reports content");
+    }
+
+    // (b) Same onset promise as the synthesised types (Phase5ClickVoiceTest (a)), plus the length
+    // contract: at matching rates a file of N samples renders N - 1 output samples. The last
+    // input sample is reached only as the far end of the final interpolation, never on its own.
+    void testPlaysFromTriggerToItsOwnEnd()
+    {
+        beginTest("(b) A sample sounds on its trigger sample and plays to its own end");
+
+        // Cosine rather than sine so the very first input sample is non-zero; a test of the onset
+        // cannot start from content that is itself silent at sample 0.
+        const int length = 1000;
+        const auto data = sine(1000.0, kSampleRate, length, juce::MathConstants<double>::halfPi);
+
+        const auto hit = render(data, kSampleRate, kSampleRate, length + 500);
+
+        expect(hit[0] != 0.0f, "A sample is silent on its own trigger sample, so its onset is late");
+
+        expectEquals(lastSounding(hit), length - 2,
+                     "A " + juce::String(length) + "-sample file did not play exactly to its own end");
+
+        // The shortest file isLoaded() accepts: one interpolation step, one output sample.
+        const std::vector<float> shortest { 1.0f, 1.0f };
+        const auto blip = render(shortest, kSampleRate, kSampleRate, 64);
+
+        expect(blip[0] != 0.0f, "A two-sample file rendered nothing");
+        expectEquals(lastSounding(blip), 0, "A two-sample file rendered past its single step");
+    }
+
+    // (c) The decay envelope is deliberately not applied to a sample (see renderSample): its
+    // envelope is part of its content, and applying an 8 ms decay would truncate nearly every real
+    // click sample with no visible reason why.
+    void testDecayDoesNotTruncateASample()
+    {
+        beginTest("(c) The decay control does not truncate a sample");
+
+        // 20 ms, longer than the shortest decay below and shorter than the longest.
+        const auto data = sine(500.0, kSampleRate, (int) (kSampleRate * 0.02));
+        const int numSamples = (int) data.size() + 256;
+
+        const auto shortDecay = render(data, kSampleRate, kSampleRate, numSamples, 1.0f, 0.001);
+        const auto longDecay  = render(data, kSampleRate, kSampleRate, numSamples, 1.0f, 0.050);
+
+        int diverged = -1;
+        for (std::size_t i = 0; i < shortDecay.size(); ++i)
+            if (std::memcmp(&shortDecay[i], &longDecay[i], sizeof(float)) != 0)
+            {
+                diverged = (int) i;
+                break;
+            }
+
+        expect(diverged < 0, "A sample renders differently at 1 ms and 50 ms decay, first at sample "
+                                 + juce::String(diverged) + " - decay is reaching a sample");
+
+        expectEquals(lastSounding(shortDecay), (int) data.size() - 2,
+                     "A 1 ms decay cut a 20 ms sample short");
+    }
+
+    // (d) A file recorded at one rate played on a device at another must keep its pitch and its
+    // duration. Both directions, because they fail differently: upsampling exercises the fractional
+    // read head, downsampling exercises an increment above 1 and the end-of-buffer guard.
+    void testRateConversionKeepsPitchAndLength()
+    {
+        beginTest("(d) Rate conversion keeps a sample's pitch and length, up and down");
+
+        struct Case { double source, device; };
+        for (const auto c : { Case { 44100.0, 96000.0 }, Case { 96000.0, 44100.0 },
+                              Case { 48000.0, 44100.0 } })
+        {
+            const double toneHz = 200.0;
+            const int sourceLength = (int) (c.source * 0.5);
+            const auto data = sine(toneHz, c.source, sourceLength);
+
+            const double increment = c.source / c.device;
+            const int expectedLength = (int) std::ceil((sourceLength - 1) / increment);
+            const auto hit = render(data, c.source, c.device, expectedLength + 512);
+
+            const juce::String label = juce::String(c.source, 0) + " Hz file at "
+                                         + juce::String(c.device, 0) + " Hz";
+
+            // ±1 because the read head accumulates a floating increment, and where exactly it
+            // crosses the last valid position can fall either side of the exact quotient.
+            const int last = lastSounding(hit);
+            expect(std::abs((last + 1) - expectedLength) <= 1,
+                   label + " rendered " + juce::String(last + 1) + " samples, expected "
+                       + juce::String(expectedLength) + " - its duration changed");
+
+            // Positive-going zero crossings over the body of the hit, away from the onset and the
+            // filter's settling. Each one is a cycle, so cycles per second is the pitch heard.
+            const int from = (int) (c.device * 0.01), to = (int) (c.device * 0.49);
+            int crossings = 0;
+            for (int i = from + 1; i < to; ++i)
+                if (hit[(std::size_t) i - 1] < 0.0f && hit[(std::size_t) i] >= 0.0f)
+                    ++crossings;
+
+            const double measuredHz = crossings / ((to - from) / c.device);
+
+            // 96 cycles in the window, so one miscounted crossing is about 1%. A missing or
+            // inverted rate conversion is off by the full ratio - at least 8.8% for 48k into 44.1k,
+            // the closest pair here, and over 100% for the others.
+            expect(std::abs(measuredHz - toneHz) < toneHz * 0.02,
+                   label + " plays at " + juce::String(measuredHz, 1) + " Hz instead of "
+                       + juce::String(toneHz, 0) + " Hz - its pitch changed");
+        }
+    }
+
+    // (e) What makes it linear rather than drop-sample. A ramp is the probe: linear interpolation
+    // of a ramp is another ramp, so every output step is identical. Drop-sample or nearest-
+    // neighbour turns it into a staircase - steps of zero alternating with whole input steps - and
+    // (d)'s pitch check cannot tell those apart.
+    //
+    // The tone filter sits between the interpolation and the output, but a one-pole driven by a
+    // ramp settles to the same ramp minus a fixed lag, so once it has settled the output steps
+    // equal the input steps exactly. That is why the first few samples are skipped.
+    void testRateConversionInterpolatesLinearly()
+    {
+        beginTest("(e) Rate conversion interpolates linearly between source samples");
+
+        const float slope = 0.001f;
+        std::vector<float> ramp(400);
+        for (int i = 0; i < (int) ramp.size(); ++i)
+            ramp[(std::size_t) i] = slope * (float) i;
+
+        // 2:1 lands on every half-sample; 44.1 into 48 never lands on the same fraction twice.
+        for (const double sourceRate : { 22050.0, 44100.0 })
+        {
+            const double deviceRate = (sourceRate == 22050.0) ? 44100.0 : 48000.0;
+            const auto hit = render(ramp, sourceRate, deviceRate, 600);
+
+            const double expectedStep = slope * sourceRate / deviceRate;
+            const int settled = 50;
+            const int end = lastSounding(hit);
+
+            double worst = 0.0;
+            for (int i = settled; i <= end; ++i)
+                worst = std::max(worst, std::abs((double) hit[(std::size_t) i]
+                                                 - (double) hit[(std::size_t) i - 1] - expectedStep));
+
+            // Against a step of a few times 1e-4: drop-sample is off by the whole step. The
+            // tolerance only absorbs float rounding of values up to 0.4.
+            expect(worst < expectedStep * 0.01,
+                   "Output steps stray " + juce::String(worst, 8) + " from the "
+                       + juce::String(expectedStep, 8) + " a linear interpolation of a ramp gives, at "
+                       + juce::String(sourceRate, 0) + " into " + juce::String(deviceRate, 0) + " Hz");
+        }
+    }
+
+    // (f) Two halves. Tone must still mean brightness on a sample, measured the same way as
+    // Phase5ClickVoiceTest (e). And it must be a low-pass only, not the band the synthesised types
+    // use: subtracting a lower corner would gut a recording's low end, which a DC probe makes
+    // unmissable — a low-pass passes it whole, a band passes none of it.
+    void testToneIsAPlainLowPass()
+    {
+        beginTest("(f) Tone darkens a sample, and keeps its low end");
+
+        // Fixed seed, so the content is the same every run.
+        juce::Random rng(0x5A3B1E);
+        std::vector<float> noise((std::size_t) (kSampleRate * 0.02));
+        for (auto& s : noise)
+            s = rng.nextFloat() * 2.0f - 1.0f;
+
+        double previous = -1.0;
+        for (const float tone : { 0.1f, 0.5f, 0.9f })
+        {
+            const auto hit = render(noise, kSampleRate, kSampleRate, (int) noise.size(), tone);
+
+            double sumAbs = 0.0, sumDelta = 0.0;
+            for (std::size_t i = 1; i < hit.size(); ++i)
+            {
+                sumAbs += std::abs((double) hit[i]);
+                sumDelta += std::abs((double) hit[i] - (double) hit[i - 1]);
+            }
+
+            const double brightness = sumDelta / sumAbs;
+            expect(brightness > previous,
+                   "A sample is no brighter at tone " + juce::String(tone, 1) + " ("
+                       + juce::String(brightness, 4) + ") than at the setting below it ("
+                       + juce::String(previous, 4) + ")");
+            previous = brightness;
+        }
+
+        // The darkest setting is the hardest case: its corner is 200 Hz, so a band two octaves
+        // below would sit at 50 Hz and still remove DC entirely.
+        const std::vector<float> dc(2000, 0.5f);
+        const auto held = render(dc, kSampleRate, kSampleRate, (int) dc.size(), 0.0f);
+
+        expect(std::abs(held[1500] - 0.5f) < 1.0e-4f,
+               "A constant sample settles at " + juce::String(held[1500], 6)
+                   + " instead of 0.5 at the darkest tone - the tone filter is removing low end");
+    }
+
+    // (g) The retrigger ramp lives in ClickVoice::processSample and does not care what a hit is
+    // playing, but a sample is the one kind of hit that has no decay of its own to end it early,
+    // so it is where a missing ramp would ring longest. Same residual method as
+    // Phase5ClickVoiceTest (d), for the same reasons — see the comment there.
+    void testRetriggerRampsOutAnOutgoingSample()
+    {
+        beginTest("(g) An outgoing sample ramps out across a retrigger instead of being cut");
+
+        // 100 ms of steady tone, so at the retrigger it has plenty of life left and nothing but the
+        // ramp can silence it.
+        const auto data = sine(1000.0, kSampleRate, (int) (kSampleRate * 0.1));
+        const auto slots = slotsWith(data, kSampleRate);
+
+        const int retriggerAt = 100;
+        const int window = 1024;
+        const int fadeMustFinishBy = (int) (kSampleRate * 0.010);
+        const int levelWindow = 16;
+
+        const auto solo = render(data, kSampleRate, kSampleRate, retriggerAt + window);
+
+        ClickVoice voice;
+        voice.prepare(kSampleRate);
+        voice.setSampleSlots(slots.data());
+        voice.setSlot(kFirstSampleSlot);
+        voice.setTone(1.0f);
+        voice.noteOn(60);
+
+        std::vector<float> out((std::size_t) (retriggerAt + window), 0.0f);
+        for (int i = 0; i < (int) out.size(); ++i)
+        {
+            if (i == retriggerAt)
+                voice.noteOn(60);
+
+            out[(std::size_t) i] = voice.processSample();
+        }
+
+        std::vector<float> residual((std::size_t) window, 0.0f);
+        for (int k = 0; k < window; ++k)
+            residual[(std::size_t) k] = out[(std::size_t) (retriggerAt + k)] - solo[(std::size_t) k];
+
+        float faded = 0.0f, unfaded = 0.0f;
+        for (int k = 0; k < levelWindow; ++k)
+        {
+            faded   = std::max(faded,   std::abs(residual[(std::size_t) k]));
+            unfaded = std::max(unfaded, std::abs(solo[(std::size_t) (retriggerAt + k)]));
+        }
+
+        expect(faded > unfaded * 0.5f,
+               "The outgoing sample vanishes at retrigger (" + juce::String(faded, 6)
+                   + " against an uninterrupted " + juce::String(unfaded, 6) + ") - it is being cut");
+
+        int stillRingingAt = -1;
+        for (int k = fadeMustFinishBy; k < window; ++k)
+            if (residual[(std::size_t) k] != 0.0f)
+            {
+                stillRingingAt = k;
+                break;
+            }
+
+        expect(stillRingingAt < 0,
+               "The outgoing sample is still sounding " + juce::String(stillRingingAt)
+                   + " samples after the retrigger, so it is never being ramped out");
+    }
+};
+
+static Phase5ClickSamplePlaybackTest phase5ClickSamplePlaybackTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

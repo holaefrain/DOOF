@@ -82,6 +82,13 @@ public:
     LayerViewPrefs&       getLayerViewPrefs(int index);
     const LayerViewPrefs& getLayerViewPrefs(int index) const;
 
+    // The decoded factory click samples behind click.type's Sample 1-4 entries. The const overload
+    // is what the click panel uses to name each slot. The non-const one exists so integration
+    // tests can load a generated WAV through the real engine, since resources/clicks/ is normally
+    // empty - and is bound by loadSlotFromMemory's own rule: message thread, audio not running.
+    ClickSampleLibrary&       getClickSamples()       { return clickSamples; }
+    const ClickSampleLibrary& getClickSamples() const { return clickSamples; }
+
 private:
     // Builds the parameter layout passed to the APVTS constructor.
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.

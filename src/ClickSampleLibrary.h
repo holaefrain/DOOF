@@ -41,8 +41,9 @@ public:
     juce::String nameOf(int slot) const;
 
     // Decodes a block of encoded audio into one slot, replacing whatever was there. Returns false
-    // and leaves the slot empty if the data is not audio this build can read, so one bad file
-    // cannot take the plugin down.
+    // and leaves the slot exactly as it was if the data is not audio this build can read, so one
+    // bad file cannot take the plugin down. At construction every slot starts empty, so a bad
+    // embedded file leaves its slot silent.
     //
     // Public because it is the only way to test the decoder at all: the embedded assets are fixed
     // at build time, and resources/clicks/ is empty in this repo, so a test that could only reach

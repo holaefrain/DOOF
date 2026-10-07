@@ -2168,6 +2168,12 @@ private:
         for (int slot = ParamIDs::firstClickSampleSlot;
              slot < ParamIDs::firstClickSampleSlot + ParamIDs::numClickSampleSlots; ++slot)
         {
+            // Only an empty slot can be checked. A build with license-clear samples in
+            // resources/clicks/ legitimately fills some, and this test must keep passing then.
+            DOOFAudioProcessor probe;
+            if (probe.getClickSamples().slots()[slot - ParamIDs::firstClickSampleSlot].isLoaded())
+                continue;
+
             const auto rendered = renderClick(slot);
 
             int soundedAt = -1;
@@ -2306,6 +2312,413 @@ private:
 };
 
 static Phase5ClickRoutingTest phase5ClickRoutingTest;
+
+// Shared by the two sample tests below. resources/clicks/ is empty in this repo, so the only way to
+// exercise the decoder or a loaded slot at all is to encode a WAV here and hand it to
+// ClickSampleLibrary::loadSlotFromMemory — the same function the constructor feeds BinaryData
+// through, not a parallel path that could drift from it.
+namespace ClickSampleFixtures
+{
+    // Encodes audio as an in-memory WAV. 32 bits means IEEE float, so a decode can be compared for
+    // exact equality; anything else is integer PCM.
+    inline juce::MemoryBlock encodeWav(const juce::AudioBuffer<float>& audio, double rate, int bits)
+    {
+        juce::MemoryBlock block;
+        std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::MemoryOutputStream>(block, false);
+
+        const auto format = bits == 32 ? juce::AudioFormatWriterOptions::SampleFormat::floatingPoint
+                                       : juce::AudioFormatWriterOptions::SampleFormat::integral;
+
+        juce::WavAudioFormat wav;
+        {
+            auto writer = wav.createWriterFor(stream, juce::AudioFormatWriterOptions{}
+                                                          .withSampleRate(rate)
+                                                          .withNumChannels(audio.getNumChannels())
+                                                          .withBitsPerSample(bits)
+                                                          .withSampleFormat(format));
+            jassert(writer != nullptr);
+            writer->writeFromAudioSampleBuffer(audio, 0, audio.getNumSamples());
+        } // the writer owns the stream; destroying it finalises the header into `block`
+
+        return block;
+    }
+
+    // A mono buffer of a decaying sine — shaped like a click, and non-zero from its first sample so
+    // an onset check has something to find.
+    inline juce::AudioBuffer<float> decayingTone(double freqHz, double rate, int numSamples)
+    {
+        juce::AudioBuffer<float> audio(1, numSamples);
+        for (int i = 0; i < numSamples; ++i)
+            audio.setSample(0, i, (float) (std::cos(juce::MathConstants<double>::twoPi * freqHz * i / rate)
+                                           * std::exp(-6.0 * i / numSamples)));
+        return audio;
+    }
+
+    inline bool load(ClickSampleLibrary& library, int slot, const juce::AudioBuffer<float>& audio,
+                     double rate, int bits, const juce::String& name)
+    {
+        const auto wav = encodeWav(audio, rate, bits);
+        return library.loadSlotFromMemory(slot, wav.getData(), (int) wav.getSize(), name);
+    }
+}
+
+// ClickSampleLibraryTest — the decoder behind click.type's Sample 1-4 entries.
+//   (a) A fresh library holds exactly what this build embedded - nothing, in this repo.
+//   (b) A float WAV decodes sample-exact, keeping its rate and name.
+//   (c) 16-bit PCM decodes to within its own quantisation step.
+//   (d) Stereo folds to the average of its channels, so dual-mono is not 6 dB hot.
+//   (e) Unreadable input is refused and leaves the slot exactly as it was.
+//   (f) An absurdly long file is capped at ten seconds.
+class ClickSampleLibraryTest : public juce::UnitTest
+{
+public:
+    ClickSampleLibraryTest() : juce::UnitTest("ClickSampleLibrary") {}
+
+    void runTest() override
+    {
+        testFreshLibraryMatchesTheBuild();
+        testFloatWavDecodesExactly();
+        testPcmWavDecodesWithinQuantisation();
+        testStereoFoldsToTheAverage();
+        testBadInputLeavesTheSlotAlone();
+        testLongFileIsCapped();
+    }
+
+private:
+    static constexpr double kRate = 44100.0;
+
+    // (a) Written against both build configurations, so it does not start failing the day a
+    // license-clear sample is dropped into resources/clicks/.
+    void testFreshLibraryMatchesTheBuild()
+    {
+        beginTest("(a) A fresh library holds exactly what this build embedded");
+
+        ClickSampleLibrary library;
+
+       #if DOOF_HAS_CLICK_SAMPLES
+        expect(library.numLoaded() >= 1 && library.numLoaded() <= ClickVoice::kNumSampleSlots,
+               "This build embeds click samples but the library loaded "
+                   + juce::String(library.numLoaded()));
+
+        // Loaded slots fill from the front in filename order, which is what a preset's slot means.
+        for (int slot = 1; slot < library.numLoaded(); ++slot)
+            expect(library.nameOf(slot - 1) < library.nameOf(slot),
+                   "Slots " + juce::String(slot - 1) + " and " + juce::String(slot)
+                       + " are not in filename order");
+       #else
+        expectEquals(library.numLoaded(), 0, "This build embeds no samples, yet a slot loaded");
+       #endif
+
+        for (int slot = 0; slot < ClickVoice::kNumSampleSlots; ++slot)
+            expect(library.slots()[slot].isLoaded() == library.nameOf(slot).isNotEmpty(),
+                   "Slot " + juce::String(slot) + "'s name and content disagree about whether it "
+                       "is loaded");
+
+        expect(library.nameOf(-1).isEmpty() && library.nameOf(ClickVoice::kNumSampleSlots).isEmpty(),
+               "nameOf answers for a slot that does not exist");
+    }
+
+    // (b) 32-bit float survives a WAV round trip bit for bit, so anything other than an exact match
+    // is the decoder's doing. Loaded into a slot other than the first, so slot addressing is
+    // checked as well as decoding.
+    void testFloatWavDecodesExactly()
+    {
+        beginTest("(b) A float WAV decodes sample-exact, keeping its rate and name");
+
+        const double rate = 48000.0;
+        const auto audio = ClickSampleFixtures::decayingTone(2000.0, rate, 500);
+
+        ClickSampleLibrary library;
+        const int before = library.numLoaded();
+        const bool slotWasLoaded = library.slots()[2].isLoaded(); // only in a build that embeds samples
+
+        expect(ClickSampleFixtures::load(library, 2, audio, rate, 32, "3-test.wav"),
+               "A valid float WAV was refused");
+
+        const auto& slot = library.slots()[2];
+        expect(slot.isLoaded(), "The slot reads as empty after a successful load");
+        expectEquals(slot.numSamples, audio.getNumSamples(), "Decoded length differs from the file");
+        expectEquals(slot.sourceSampleRate, rate, "The file's own sample rate was not kept");
+        expectEquals(library.nameOf(2), juce::String("3-test.wav"), "The slot's name was not kept");
+        expectEquals(library.numLoaded(), before + (slotWasLoaded ? 0 : 1),
+                     "numLoaded did not count the new slot");
+
+        int mismatch = -1;
+        for (int i = 0; i < audio.getNumSamples() && slot.isLoaded(); ++i)
+            if (std::memcmp(slot.data + i, audio.getReadPointer(0) + i, sizeof(float)) != 0)
+            {
+                mismatch = i;
+                break;
+            }
+
+        expect(mismatch < 0, "Decoded float audio differs from the file at sample "
+                                 + juce::String(mismatch));
+    }
+
+    // (c) Factory clicks are far more likely to arrive as 16- or 24-bit PCM than float, so the
+    // integer path gets its own check. Exactness is not possible here; one quantisation step is
+    // the honest tolerance.
+    void testPcmWavDecodesWithinQuantisation()
+    {
+        beginTest("(c) 16-bit PCM decodes to within its own quantisation step");
+
+        const auto audio = ClickSampleFixtures::decayingTone(1500.0, kRate, 400);
+
+        ClickSampleLibrary library;
+        expect(ClickSampleFixtures::load(library, 0, audio, kRate, 16, "pcm.wav"),
+               "A valid 16-bit WAV was refused");
+
+        const auto& slot = library.slots()[0];
+        expectEquals(slot.numSamples, audio.getNumSamples(), "Decoded length differs from the file");
+
+        double worst = 0.0;
+        for (int i = 0; i < audio.getNumSamples() && slot.isLoaded(); ++i)
+            worst = juce::jmax(worst, std::abs((double) slot.data[i] - (double) audio.getSample(0, i)));
+
+        expect(worst <= 1.0 / 32768.0,
+               "16-bit decode is off by " + juce::String(worst, 8) + ", more than one step");
+    }
+
+    // (d) DOOF's core is mono until Phase 7, so a stereo file is folded down. Averaged, not summed:
+    // a click saved as dual-mono must play at the level the same click saved as mono does.
+    void testStereoFoldsToTheAverage()
+    {
+        beginTest("(d) Stereo folds to the average of its channels, so dual-mono is not 6 dB hot");
+
+        const int length = 300;
+        const auto mono = ClickSampleFixtures::decayingTone(1000.0, kRate, length);
+
+        juce::AudioBuffer<float> dualMono(2, length);
+        dualMono.copyFrom(0, 0, mono, 0, 0, length);
+        dualMono.copyFrom(1, 0, mono, 0, 0, length);
+
+        // Different content on each side, so the fold's weighting is visible rather than hidden by
+        // identical channels.
+        juce::AudioBuffer<float> wide(2, length);
+        for (int i = 0; i < length; ++i)
+        {
+            wide.setSample(0, i, 0.8f);
+            wide.setSample(1, i, -0.2f);
+        }
+
+        ClickSampleLibrary library;
+        expect(ClickSampleFixtures::load(library, 0, mono,     kRate, 32, "mono.wav"), "Mono refused");
+        expect(ClickSampleFixtures::load(library, 1, dualMono, kRate, 32, "dual.wav"), "Dual-mono refused");
+        expect(ClickSampleFixtures::load(library, 2, wide,     kRate, 32, "wide.wav"), "Stereo refused");
+
+        double worstDual = 0.0, worstWide = 0.0;
+        for (int i = 0; i < length; ++i)
+        {
+            worstDual = juce::jmax(worstDual, std::abs((double) library.slots()[1].data[i]
+                                                       - (double) library.slots()[0].data[i]));
+            worstWide = juce::jmax(worstWide, std::abs((double) library.slots()[2].data[i] - 0.3));
+        }
+
+        expect(worstDual < 1.0e-6, "Dual-mono decodes " + juce::String(worstDual, 8)
+                                       + " away from the same audio saved as mono");
+        expect(worstWide < 1.0e-6, "0.8 left and -0.2 right fold to something other than 0.3 "
+                                   "(off by " + juce::String(worstWide, 8) + ")");
+    }
+
+    // (e) One bad file must not take the plugin down, and must not damage what is already loaded.
+    void testBadInputLeavesTheSlotAlone()
+    {
+        beginTest("(e) Unreadable input is refused and leaves the slot exactly as it was");
+
+        ClickSampleLibrary library;
+
+        const auto audio = ClickSampleFixtures::decayingTone(1000.0, kRate, 200);
+        expect(ClickSampleFixtures::load(library, 0, audio, kRate, 32, "good.wav"), "Setup load refused");
+
+        const ClickSample before = library.slots()[0];
+
+        const char garbage[] = "this is not a wav file, not even close";
+        expect(! library.loadSlotFromMemory(0, garbage, (int) sizeof(garbage), "garbage.wav"),
+               "Garbage bytes were accepted as audio");
+
+        // A file isLoaded() would reject anyway: one sample leaves nothing to interpolate toward.
+        juce::AudioBuffer<float> single(1, 1);
+        single.setSample(0, 0, 0.5f);
+        expect(! ClickSampleFixtures::load(library, 0, single, kRate, 32, "single.wav"),
+               "A one-sample file was accepted");
+
+        const auto& after = library.slots()[0];
+        expect(after.data == before.data && after.numSamples == before.numSamples
+                   && juce::exactlyEqual(after.sourceSampleRate, before.sourceSampleRate),
+               "A refused load changed the slot it was refused for");
+        expectEquals(library.nameOf(0), juce::String("good.wav"), "A refused load renamed the slot");
+
+        for (const int badSlot : { -1, ClickVoice::kNumSampleSlots })
+            expect(! ClickSampleFixtures::load(library, badSlot, audio, kRate, 32, "nowhere.wav"),
+                   "A load into slot " + juce::String(badSlot) + ", which does not exist, succeeded");
+    }
+
+    // (f) A guard against an accidentally embedded long file. 8 kHz keeps the test file small.
+    void testLongFileIsCapped()
+    {
+        beginTest("(f) An absurdly long file is capped at ten seconds");
+
+        const double rate = 8000.0;
+        juce::AudioBuffer<float> longFile(1, (int) (rate * 11.0));
+        longFile.clear();
+        longFile.setSample(0, 0, 1.0f);
+
+        ClickSampleLibrary library;
+        expect(ClickSampleFixtures::load(library, 0, longFile, rate, 16, "long.wav"),
+               "An 11-second file was refused rather than capped");
+        expectEquals(library.slots()[0].numSamples, (int) (rate * 10.0),
+                     "An 11-second file was not capped at ten seconds");
+    }
+};
+
+static ClickSampleLibraryTest clickSampleLibraryTest;
+
+// Phase5ClickSampleEngineTest — a loaded sample slot played through the real processor.
+//   (a) Each Sample N choice plays slot N and only slot N.
+//   (b) A sample note-on is sample-aligned, with the same two-part claim as Phase5MidiDispatchTest.
+//
+// Phase5ClickRoutingTest (c) proves an empty slot is silent; this is the other half, that a loaded
+// one is actually reached. Both are needed: hasContentFor answering false for everything would
+// pass (c) on its own.
+class Phase5ClickSampleEngineTest : public juce::UnitTest
+{
+public:
+    Phase5ClickSampleEngineTest() : juce::UnitTest("Phase5ClickSampleEngine") {}
+
+    void runTest() override
+    {
+        testEachChoiceReachesItsOwnSlot();
+        testSampleOnsetIsSampleAligned();
+    }
+
+private:
+    static constexpr double kSampleRate = 44100.0;
+    static constexpr int kBlockSize = 512;
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    // Layer 1 to Click on the given choice, everything else at its default (layers 2-5 Off).
+    static void selectClick(DOOFAudioProcessor& processor, int choice)
+    {
+        setParamValue(processor, ParamIDs::layerType(0), (float) (int) ParamIDs::LayerType::click);
+        setParamValue(processor, ParamIDs::layerClickType(0), (float) choice);
+    }
+
+    // Renders `totalSamples` in kBlockSize blocks with one note-on at `offset`. prepareToPlay per
+    // render, so every voice starts idle and the smoothers sit on their targets.
+    static std::vector<float> render(DOOFAudioProcessor& processor, int offset, int totalSamples)
+    {
+        processor.prepareToPlay(kSampleRate, kBlockSize);
+
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, kBlockSize);
+        for (int blockStart = 0; blockStart < totalSamples; blockStart += kBlockSize)
+        {
+            juce::MidiBuffer midi;
+            if (offset >= blockStart && offset < blockStart + kBlockSize)
+                midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), offset - blockStart);
+
+            processor.processBlock(buffer, midi);
+            out.insert(out.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + kBlockSize);
+        }
+
+        return out;
+    }
+
+    static bool anySound(const std::vector<float>& samples)
+    {
+        for (const auto s : samples)
+            if (s != 0.0f)
+                return true;
+        return false;
+    }
+
+    // (a) Slot k loaded and the other three left empty, for each k in turn. A choice-to-slot
+    // off-by-one, or every choice reading slot 0, shows up as the wrong choice sounding.
+    void testEachChoiceReachesItsOwnSlot()
+    {
+        beginTest("(a) Each Sample N choice plays slot N and only slot N");
+
+        const auto audio = ClickSampleFixtures::decayingTone(3000.0, kSampleRate, 600);
+
+        for (int loaded = 0; loaded < ParamIDs::numClickSampleSlots; ++loaded)
+        {
+            for (int slot = 0; slot < ParamIDs::numClickSampleSlots; ++slot)
+            {
+                DOOFAudioProcessor processor;
+
+                // A build that embeds samples would have this slot filled already, and nothing
+                // here can empty it again; the claim is only checkable against an empty one.
+                if (slot != loaded && processor.getClickSamples().slots()[slot].isLoaded())
+                    continue;
+
+                if (slot == loaded)
+                    expect(ClickSampleFixtures::load(processor.getClickSamples(), loaded, audio,
+                                                     kSampleRate, 32, "slot.wav"),
+                           "Setup load refused");
+
+                selectClick(processor, ParamIDs::firstClickSampleSlot + slot);
+                const bool sounded = anySound(render(processor, 0, 2048));
+
+                expect(sounded == (slot == loaded),
+                       "With only slot " + juce::String(loaded + 1) + " loaded, Sample "
+                           + juce::String(slot + 1) + (sounded ? " sounded" : " was silent"));
+            }
+        }
+    }
+
+    // (b) A sample is the click most likely to start on a non-zero value, so it is the strictest
+    // test of Step 1's sample-accurate dispatch reaching through to a click layer.
+    void testSampleOnsetIsSampleAligned()
+    {
+        beginTest("(b) A sample note-on is silent before its position and identical from it");
+
+        const auto audio = ClickSampleFixtures::decayingTone(3000.0, kSampleRate, 600);
+        const int tail = 2048;
+
+        auto renderAt = [&](int offset)
+        {
+            DOOFAudioProcessor processor;
+            ClickSampleFixtures::load(processor.getClickSamples(), 0, audio, kSampleRate, 32, "s.wav");
+            selectClick(processor, (int) ParamIDs::ClickType::sample1);
+            return render(processor, offset, tail + kBlockSize);
+        };
+
+        const auto reference = renderAt(0);
+        expect(reference[0] != 0.0f, "A loaded sample is silent on its own note-on sample");
+
+        for (const int offset : { 1, 37, 511 })
+        {
+            const auto shifted = renderAt(offset);
+
+            int early = -1;
+            for (int i = 0; i < offset; ++i)
+                if (shifted[(size_t) i] != 0.0f) { early = i; break; }
+
+            expect(early < 0, "Sample note-on at " + juce::String(offset)
+                                  + " sounded early, at sample " + juce::String(early));
+
+            int diverged = -1;
+            for (int i = 0; i < tail; ++i)
+                if (std::memcmp(&shifted[(size_t) (offset + i)], &reference[(size_t) i], sizeof(float)) != 0)
+                {
+                    diverged = i;
+                    break;
+                }
+
+            expect(diverged < 0, "Sample note-on at " + juce::String(offset) + " differs from the "
+                                     "same note at sample 0, " + juce::String(diverged)
+                                     + " samples in");
+        }
+    }
+};
+
+static Phase5ClickSampleEngineTest phase5ClickSampleEngineTest;
 
 
 
