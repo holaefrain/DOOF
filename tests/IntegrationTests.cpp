@@ -7,6 +7,9 @@
 #include "PluginEditor.h"
 #include "ClickPanel.h"
 
+#include <juce_dsp/juce_dsp.h> // FFT for Phase5VerifyTest (c)
+
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -3033,6 +3036,275 @@ private:
 };
 
 static Phase5ClickPanelTest phase5ClickPanelTest;
+
+// Phase5VerifyTest — §6 Phase 5's verify list, as far as it can be measured:
+//   (a) "Render and assert the click onset is sample-aligned to note-on" - for every synthesised
+//       type, stacked on a sub, including note-ons that land on a block boundary.
+//   (b) "Fast-trigger repeatedly - no clicks at sample boundaries" - a dense retrigger pattern
+//       renders bit-identically at any block size, so where the host cuts its buffers is inaudible.
+//       That the outgoing hit ramps rather than cuts is the voice-level half, pinned by
+//       Phase5ClickVoiceTest (d) and Phase5ClickSamplePlaybackTest (g).
+//   (c) "FFT the render and assert transient energy is in the high band, sub energy in the low
+//       band" - with a real FFT, for every synthesised type at its default settings.
+//
+// "Stack a click on a sub - it sounds like one cohesive kick" is a listening judgement and stays
+// manual; see the dev log's Phase 5 verify entry.
+class Phase5VerifyTest : public juce::UnitTest
+{
+public:
+    Phase5VerifyTest() : juce::UnitTest("Phase5Verify") {}
+
+    void runTest() override
+    {
+        testStackedOnsetIsSampleAligned();
+        testFastRetriggerIsBlockSizeInvariant();
+        testSpectralSplit();
+    }
+
+private:
+    static constexpr double kSampleRate = 44100.0;
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    // The kick §6 asks about: layer 1 the factory Sub, layer 2 a Click of the given type on top.
+    // Everything else at its default.
+    static void stack(DOOFAudioProcessor& processor, int clickType)
+    {
+        setParamValue(processor, ParamIDs::layerType(1), (float) (int) ParamIDs::LayerType::click);
+        setParamValue(processor, ParamIDs::layerClickType(1), (float) clickType);
+    }
+
+    // Renders `totalSamples` in blocks of `blockSize`, with a note-on at every position in `hits`.
+    // prepareToPlay per render, so every voice starts idle and the smoothers sit on their targets.
+    static std::vector<float> render(DOOFAudioProcessor& processor, const std::vector<int>& hits,
+                                     int totalSamples, int blockSize)
+    {
+        processor.prepareToPlay(kSampleRate, blockSize);
+
+        std::vector<float> out;
+        out.reserve((size_t) totalSamples);
+
+        juce::AudioBuffer<float> buffer(2, blockSize);
+        for (int blockStart = 0; blockStart < totalSamples; blockStart += blockSize)
+        {
+            const int length = juce::jmin(blockSize, totalSamples - blockStart);
+            buffer.setSize(2, length, false, false, true);
+
+            juce::MidiBuffer midi;
+            for (const int hit : hits)
+                if (hit >= blockStart && hit < blockStart + length)
+                    midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), hit - blockStart);
+
+            processor.processBlock(buffer, midi);
+            out.insert(out.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + length);
+        }
+
+        return out;
+    }
+
+    static int firstDifference(const float* a, const float* b, int count)
+    {
+        for (int i = 0; i < count; ++i)
+            if (std::memcmp(a + i, b + i, sizeof(float)) != 0)
+                return i;
+        return -1;
+    }
+
+    static juce::String typeName(int type) { return ParamIDs::clickTypeChoices()[type]; }
+
+    // (a) Stricter than Phase5MidiDispatchTest, which used the Sub alone: the sub's first sample is
+    // sin(0) = 0, so a dispatch that landed one sample late could still pass there. Every click type
+    // is non-zero on its very first sample (Phase5ClickVoiceTest (a)), so here the note-on sample
+    // itself must sound - one sample late is a failure.
+    void testStackedOnsetIsSampleAligned()
+    {
+        beginTest("(a) A stacked kick's click lands exactly on its note-on sample, for every type");
+
+        const int blockSize = 512;
+        const int tail = 4096;
+
+        for (int type = 0; type < ClickVoice::kNumTypes; ++type)
+        {
+            DOOFAudioProcessor referenceProcessor;
+            stack(referenceProcessor, type);
+            const auto reference = render(referenceProcessor, { 0 }, tail, blockSize);
+
+            // 512 is the first sample of the second block - the boundary case a per-block
+            // dispatch would get right by accident and a cursor off-by-one would get wrong.
+            for (const int offset : { 1, 37, 511, 512, 700 })
+            {
+                DOOFAudioProcessor processor;
+                stack(processor, type);
+                const auto shifted = render(processor, { offset }, tail + offset, blockSize);
+
+                int early = -1;
+                for (int i = 0; i < offset; ++i)
+                    if (shifted[(size_t) i] != 0.0f) { early = i; break; }
+
+                expect(early < 0, typeName(type) + ": note-on at " + juce::String(offset)
+                                      + " sounded early, at sample " + juce::String(early));
+
+                expect(shifted[(size_t) offset] != 0.0f,
+                       typeName(type) + ": note-on at " + juce::String(offset)
+                           + " is silent on its own sample, so the click arrives late");
+
+                const int diverged = firstDifference(shifted.data() + offset, reference.data(), tail);
+                expect(diverged < 0, typeName(type) + ": note-on at " + juce::String(offset)
+                                         + " differs from the same note at sample 0, "
+                                         + juce::String(diverged) + " samples in");
+            }
+        }
+    }
+
+    // (b) Any audible artefact at a buffer boundary - a voice skipping or repeating a sample, a
+    // smoother stepping, the DC blocker losing state, an event being dropped or moved - would make
+    // the render depend on where the boundaries fall. So the same performance is rendered at a
+    // spread of block sizes, including one sample and one odd size, and must be bit-identical.
+    //
+    // The pattern is deliberately hostile: a burst of retriggers 37 samples apart (faster than any
+    // click's own decay, and than the 5 ms retrigger ramp), hits placed exactly on multiples of 64
+    // and 512, two hits on the same sample, then a slower run that lets each tail overlap the next.
+    void testFastRetriggerIsBlockSizeInvariant()
+    {
+        beginTest("(b) Fast retriggering renders bit-identically at every block size");
+
+        std::vector<int> hits;
+        for (int i = 0; i < 40; ++i)
+            hits.push_back(100 + 37 * i);
+        for (const int boundary : { 2048, 2560, 3072, 3072, 4096 })
+            hits.push_back(boundary);
+        for (int i = 0; i < 20; ++i)
+            hits.push_back(4200 + 211 * i);
+        std::sort(hits.begin(), hits.end());
+
+        const int totalSamples = 16384;
+
+        for (const int type : { (int) ParamIDs::ClickType::tick, (int) ParamIDs::ClickType::noise })
+        {
+            DOOFAudioProcessor referenceProcessor;
+            stack(referenceProcessor, type);
+            const auto reference = render(referenceProcessor, hits, totalSamples, totalSamples);
+
+            bool finite = true;
+            for (const auto s : reference)
+                finite = finite && std::isfinite(s);
+            expect(finite, typeName(type) + ": the retrigger burst produced a non-finite sample");
+
+            for (const int blockSize : { 1, 64, 333, 512, 1024 })
+            {
+                DOOFAudioProcessor processor;
+                stack(processor, type);
+                const auto rendered = render(processor, hits, totalSamples, blockSize);
+
+                const int diverged = firstDifference(rendered.data(), reference.data(), totalSamples);
+                expect(diverged < 0, typeName(type) + ": at " + juce::String(blockSize)
+                                         + "-sample blocks the render departs from a single block at "
+                                           "sample " + juce::String(diverged));
+            }
+        }
+    }
+
+    // Energy below and above a split frequency, from a zero-padded FFT of the whole render.
+    struct BandEnergy { double low = 0.0, high = 0.0; double total() const { return low + high; } };
+
+    static BandEnergy bandEnergy(const std::vector<float>& signal, double splitHz)
+    {
+        constexpr int order = 16; // 65536 points, 1.5 s at 44.1 kHz - longer than the sub's tail
+        juce::dsp::FFT fft(order);
+
+        std::vector<float> data((size_t) fft.getSize() * 2, 0.0f);
+        std::copy_n(signal.begin(), juce::jmin((int) signal.size(), fft.getSize()), data.begin());
+        fft.performFrequencyOnlyForwardTransform(data.data(), true);
+
+        BandEnergy energy;
+        for (int bin = 1; bin <= fft.getSize() / 2; ++bin)
+        {
+            const double freq = bin * kSampleRate / fft.getSize();
+            const double power = (double) data[(size_t) bin] * (double) data[(size_t) bin];
+            (freq < splitHz ? energy.low : energy.high) += power;
+        }
+        return energy;
+    }
+
+    static double dB(double ratio) { return 10.0 * std::log10(ratio); }
+
+    // (c) Each layer of the stack is rendered alone, via solo so the real mixer path is used, and
+    // split at 300 Hz: above the sub's 150 Hz start pitch with room for its falling sweep's
+    // sidebands, and well below where any click type's energy is centred at its default tone.
+    //
+    // Two claims per type, matching the two halves of §6's sentence. Each layer's own energy sits
+    // in its own band; and in the stack, each band is owned by the layer meant to fill it - the
+    // click is not muddying the low end, nor the sub leaking into the top.
+    void testSpectralSplit()
+    {
+        beginTest("(c) FFT: transient energy in the high band, sub energy in the low band");
+
+        const double splitHz = 300.0;
+        const int totalSamples = 65536;
+
+        auto renderLayer = [&](int type, int soloLayer)
+        {
+            DOOFAudioProcessor processor;
+            stack(processor, type);
+            setParamValue(processor, ParamIDs::layerSolo(soloLayer), 1.0f);
+            return render(processor, { 0 }, totalSamples, 512);
+        };
+
+        const auto sub = bandEnergy(renderLayer(0, 0), splitHz);
+        const double subLowShare = sub.low / sub.total();
+
+        logMessage("Sub: " + juce::String(subLowShare * 100.0, 2) + "% of energy below "
+                   + juce::String(splitHz, 0) + " Hz");
+
+        for (int type = 0; type < ClickVoice::kNumTypes; ++type)
+        {
+            const auto click = bandEnergy(renderLayer(type, 1), splitHz);
+            const double clickHighShare = click.high / click.total();
+            const double highOwnership = dB(click.high / sub.high);
+            const double lowOwnership  = dB(sub.low / click.low);
+
+            logMessage(typeName(type) + ": " + juce::String(clickHighShare * 100.0, 2)
+                       + "% above split; high band click/sub " + juce::String(highOwnership, 1)
+                       + " dB; low band sub/click " + juce::String(lowOwnership, 1) + " dB");
+
+            expect(clickHighShare > kClickHighShare,
+                   typeName(type) + " has only " + juce::String(clickHighShare * 100.0, 1)
+                       + "% of its energy above " + juce::String(splitHz, 0) + " Hz");
+            expect(highOwnership > kHighOwnershipDb,
+                   typeName(type) + " is only " + juce::String(highOwnership, 1)
+                       + " dB above the sub in the high band");
+            expect(lowOwnership > kLowOwnershipDb,
+                   "The sub is only " + juce::String(lowOwnership, 1) + " dB above "
+                       + typeName(type) + " in the low band");
+        }
+
+        expect(subLowShare > kSubLowShare,
+               "The sub has only " + juce::String(subLowShare * 100.0, 1) + "% of its energy below "
+                   + juce::String(splitHz, 0) + " Hz");
+    }
+
+    // Thresholds set from measurement with margin, not guessed. Measured at 44.1 kHz on the factory
+    // patch: the sub keeps 99.96% of its energy below 300 Hz; the clicks keep 97.6% (tick) to 99.8%
+    // (snap) above it; in the low band the sub leads every click by 45-53 dB.
+    static constexpr double kSubLowShare     = 0.995;
+    static constexpr double kClickHighShare  = 0.95;
+    static constexpr double kLowOwnershipDb  = 30.0;
+
+    // The weakest margin, and deliberately only "the click leads". Above 300 Hz the click leads the
+    // sub by just 2.4 dB (tick) to 9.8 dB (thump), because the sub has a transient of its own: its
+    // factory amp envelope rises 0 to 1 in 2 ms, and 98% of the sub's energy above 300 Hz lands in
+    // its first 10 ms. Nothing leaks at the tail - the envelope's end contributes none. The sub is
+    // 32 dB louder overall than a tick, so even 0.04% of it is comparable. That is a property of
+    // the default patch, not a defect; this asserts the click still owns the top end in spite of it.
+    static constexpr double kHighOwnershipDb = 0.0;
+};
+
+static Phase5VerifyTest phase5VerifyTest;
 
 
 
