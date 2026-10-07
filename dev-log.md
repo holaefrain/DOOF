@@ -25,7 +25,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 2 | Node-based envelope engine | Complete | ✅ |
 | 3 | Envelope canvas (GUI) + minimal preset save/load | Complete | ✅ |
 | 4 | Layers + mixer | Complete | ✅ |
-| 5 | Click layers | Not started | — |
+| 5 | Click layers | Built — by-ear check pending | ✅ automated / ⏳ by ear |
 | 6 | Sub tuning + phase tools | Not started | — |
 | 7 | FX suite + routing matrix | Not started | — |
 | 8 | EQ + spectral analyzer | Not started | — |
@@ -54,6 +54,61 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 ---
 
 ## Sessions
+
+---
+
+### Session 2026-10-06
+
+**Goal:** Finish Phase 5 — tests for the sample library, the Click layer's contextual panel, and the §6 verify checks — then bring the docs up to date.
+
+**Earlier Phase 5 work, 2026-08-06 (reconstructed from the commits — that session left no log entry):**
+
+1. **Sample-accurate MIDI dispatch** (`c1697f0`, `1c2aad5`) — `processBlock` used to drain the whole `MidiBuffer` before rendering, so every note-on fired at sample 0 of its block: up to 11 ms early at 512 samples. Inaudible on the sub's slow attack, which is how it survived four phases; fatal for a click. The block is now rendered in spans between events (`renderRange`).
+2. **`ClickVoice`** (`1a64806`, `7f60606`) — four synthesised transients (tick, noise, snap, thump), a one-pole tone control, and an exact-duration decay. juce_core only, like `SubVoice`, so it tests in the lean target. Retriggering ramps the outgoing hit *in parallel* with the new one rather than choking first — a 5 ms serial choke is longer than the whole click and would throw away the sample-accurate onset. Testing caught two off-by-one bugs in the decay.
+3. **Click parameters** (`f981177`) — per layer `click.type` (a fixed 8-entry list: 4 synthesised + 4 sample slots, never to grow), `click.tone` (0–1), `click.decay` (1–50 ms, skewed around the 8 ms default).
+4. **Routing** (`d2b935e`, `64924a1`) — each layer ticks both voices and mixes the one its type selects. This pinned a bug that had been live since Phase 4: a Click layer rendered its *SubVoice*, so it sounded exactly like a Sub.
+5. **Sample pipeline** (`8e2901a`, `bb68015`) — any `.wav` in `resources/clicks/` is embedded at build time and decoded once by `ClickSampleLibrary` on the message thread; `ClickVoice` plays it with linear-interpolated rate conversion. The folder ships empty on purpose (§8 licensing), and an empty slot is silent rather than a fallback.
+
+**This session:**
+
+1. **Sample tests** (`bf2bde5`) — `Phase5ClickSamplePlaybackTest` (lean target) drives `ClickVoice` from hand-built `ClickSample` structs: slot content, onset and natural end, decay not truncating a sample, pitch and length kept across rate conversion both ways, a ramp probe proving the interpolation is linear rather than drop-sample, tone as a low-pass that keeps DC, and the retrigger ramp on a sample. `ClickSampleLibraryTest` encodes WAVs in memory and checks exact float decode, 16-bit within one step, stereo folded to the average, refused input leaving the slot untouched, and the 10 s cap. `Phase5ClickSampleEngineTest` loads slots into the real processor: each Sample N choice reaches only slot N, with a sample-aligned onset.
+2. **Click panel** (`d913a20`) — `src/ClickPanel.h/.cpp` replaces the placeholder whenever the selected layer is Click: a type list naming each slot's file or "(empty)", Tone/Decay/Level knobs, and a status line. One panel re-pointed at the selected layer by rebuilding its attachments, the same way the canvas is re-pointed. `Phase5ClickPanelTest` covers it.
+3. **Verify tests** (`4fe119f`) — `Phase5VerifyTest`; results below.
+
+**Bugs/issues found and fixed this session:**
+
+1. **`Phase5ClickRoutingTest` (c) would have failed in any build that ships samples** — it asserted all four sample slots are silent, which is only true while `resources/clicks/` is empty. It now skips slots the build has filled. Same treatment for every new test that assumes an empty slot.
+2. **`loadSlotFromMemory`'s comment was wrong** — it said a refused load "leaves the slot empty"; the code leaves it exactly as it was (it returns before touching storage). The code's behaviour is the right one, so the comment was corrected and the behaviour pinned.
+3. **The editor's "DOOF" watermark showed through the panel**, and Tone/Level printed seven decimal places. Both found only by rendering the editor to PNG — the Phase 4 lesson again. Fixed with an opaque panel background and percentage text.
+
+**Decisions made this session:**
+- **Decay shows in ms, Tone and Level in %.** `ParamIDs.h` called the ms display a Phase 12 skinning concern; it is done now because it is display-only (installed after the attachment, which would otherwise overwrite it) and "0.0080000" in the flat skin was unreadable. Stored values and ranges are unchanged.
+- **The panel's Level is the layer's own `level` parameter** — a second attachment beside the strip's slider, not a new parameter. §6's "per-click level" is the layer level, as `createParameterLayout` already decided.
+- **Decay is greyed out, not hidden, for a sample slot** — samples play to their own end, and hiding it would make the layout jump as the type changes.
+- **`DOOFAudioProcessor::getClickSamples()`** added — const for the panel's slot names, non-const so integration tests can load a generated WAV through the real engine (`resources/clicks/` is empty, so there is no other way to reach a loaded slot).
+
+**Verify result (Phase 5 §6):**
+
+| §6 check | Result |
+|---|---|
+| Click onset sample-aligned to note-on | ✅ every synthesised type stacked on the sub, plus a loaded sample: silent before the note-on, sounding *on* it (stricter than the sub-only dispatch test, whose first sample is sin(0) = 0), bit-identical to the same note at sample 0 — including a note-on on a block boundary |
+| Fast-trigger repeatedly — no clicks at sample boundaries | ✅ a dense retrigger pattern (37-sample bursts, hits on block boundaries, a doubled hit) renders **bit-identically** at 1, 64, 333, 512 and 1024-sample blocks; the outgoing hit ramping rather than cutting is pinned at voice level for both synthesised hits and samples |
+| FFT: transient energy high, sub energy low | ✅ 65536-point FFT split at 300 Hz: the sub has 99.96% of its energy below; the clicks have 97.6% (tick) to 99.8% (snap) above; the sub leads the low band by 45–53 dB |
+| Stack a click on a sub — one cohesive kick | ⏳ **by ear, not yet done** — needs a listen in the Standalone or a DAW |
+
+Every new test was bite-tested by breaking the code it guards: drop-sample interpolation, no rate conversion, every choice reading slot 0, a summing stereo fold, the panel pinned to layer 1, the poll not refreshing the panel, no ms conversion, a DC blocker reset per block, and a note-on dispatched one sample late. Each failed the test aimed at it.
+
+94 subtests across both binaries (43 + 51), 0 failures; `DOOFTests`, `DOOFIntegrationTests`, `DOOF_VST3` and `DOOF_Standalone` build with zero compiler warnings.
+
+**Worth knowing from the FFT:** above 300 Hz the click leads the sub by only 2.4 dB (tick) to 9.8 dB (thump). Traced rather than assumed: 98% of the sub's high-band energy is in its first 10 ms — the factory amp envelope rises 0→1 in 2 ms, which is a small transient of its own — and none comes from the tail. The sub is 32 dB louder overall than a tick, so even 0.04% of it is comparable. Not a defect, but relevant to the by-ear check: the default sub already has some click in it.
+
+**Still outstanding:** the by-ear cohesive-kick check, then Phase 5 can be marked complete. The DAW pass carried over from Phase 4 also still applies.
+
+**Next steps:** Phase 6 — sub tuning and phase tools.
+
+**Open questions this session:**
+- Should the factory sub's 2 ms attack be softened now that a Click layer exists to supply the transient? It is a sound-design call, best made during the by-ear check.
+- The Phase 4 GUI tests log `juce_Component.cpp:3022` assertions — the editor calls `grabKeyboardFocus()` in its constructor while not on screen. Harmless headless and not a test failure, but noise in the log; a `isShowing()` guard would silence it.
 
 ---
 

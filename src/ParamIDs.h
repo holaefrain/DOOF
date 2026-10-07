@@ -71,8 +71,8 @@ namespace ParamIDs
 
     // Decay range, in seconds. §6 describes a click as a 1-20 ms transient; the ceiling sits above
     // that so a click can also be pushed into short-burst territory when layered under a sub.
-    // Stored in seconds because that is what ClickVoice takes — showing it in ms is a skinning
-    // concern (Phase 12), not a change to the stored value.
+    // Stored in seconds because that is what ClickVoice takes. ClickPanel shows it in ms, which is
+    // display only and never a change to the stored value.
     static constexpr float clickDecayMinSeconds     = 0.001f;
     static constexpr float clickDecayMaxSeconds     = 0.050f;
     static constexpr float clickDecayDefaultSeconds = 0.008f;
