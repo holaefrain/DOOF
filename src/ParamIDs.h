@@ -2,6 +2,7 @@
 #include <juce_core/juce_core.h>
 #include "ClickVoice.h"
 #include "SubVoice.h"
+#include "PitchSnap.h"
 
 // ParamIDs — the stable APVTS parameter ID strings, in one place.
 //
@@ -32,13 +33,9 @@ namespace ParamIDs
     static const juce::String masterKeyRoot = "master.keyRoot";
     static constexpr int keyRootDefault = 60;
 
-    // Note names as Ableton prints them, where middle C (60) is C3 and MIDI 0 is C-2. Written out
-    // rather than taken from juce::MidiMessage so this header stays juce_core only.
-    inline juce::String noteName(int midiNote)
-    {
-        static const char* const names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-        return juce::String(names[((midiNote % 12) + 12) % 12]) + juce::String(midiNote / 12 - 2);
-    }
+    // Note names as Ableton prints them, where middle C (60) is C3. One implementation, shared with
+    // the canvas's pitch readout.
+    inline juce::String noteName(int midiNote) { return PitchSnap::noteName(midiNote); }
 
     // Choice indices for layerN.type. These integers ARE the parameter's
     // stored choice indices, so this order is part of the preset contract and

@@ -6,6 +6,7 @@
 #include "EnvelopePublisher.h"
 #include "DefaultEnvelopes.h"
 #include "LayerAudibility.h"
+#include "PitchSnap.h"
 
 #include <algorithm>
 #include <array>
@@ -2947,6 +2948,108 @@ private:
 };
 
 static Phase6PhaseTest phase6PhaseTest;
+
+// Phase6PitchSnapTest — pitch snap to the nearest note (§3.5), and that a snapped node plays it.
+//   (a) Note frequencies and the nearest-note search, in pitch rather than Hz.
+//   (b) Snapping inside a range steps inward at the edges rather than leaving the range.
+//   (c) A snapped node plays exactly its note - through master tuning and keytracking too.
+//   (d) Note names are Ableton's (middle C = C3).
+class Phase6PitchSnapTest : public juce::UnitTest
+{
+public:
+    Phase6PitchSnapTest() : juce::UnitTest("Phase6PitchSnap") {}
+
+    void runTest() override
+    {
+        testNotesAndNearest();
+        testSnapWithinARange();
+        testSnappedNodePlaysItsNote();
+        testNoteNames();
+    }
+
+private:
+    static constexpr double kSr = Phase6Fixtures::kSampleRate;
+
+    void testNotesAndNearest()
+    {
+        beginTest("(a) Note frequencies, and the nearest note measured in pitch");
+
+        expectWithinAbsoluteError(PitchSnap::noteToFrequency(69), 440.0, 1.0e-12, "A4 is not 440 Hz");
+        expectWithinAbsoluteError(PitchSnap::noteToFrequency(57), 220.0, 1.0e-12, "A3 is not 220 Hz");
+        expectWithinAbsoluteError(PitchSnap::noteToFrequency(36), 65.40639, 1.0e-4, "C1 (MIDI 36) is wrong");
+
+        for (int note = 0; note <= 127; ++note)
+        {
+            const double hz = PitchSnap::noteToFrequency(note);
+            expectEquals(PitchSnap::nearestNote(hz), note, "Note " + juce::String(note) + " does not round-trip");
+            expectEquals(PitchSnap::nearestNote(hz * std::exp2(49.0 / 1200.0)), note, "49 cents sharp left its note");
+            expectEquals(PitchSnap::nearestNote(hz * std::exp2(-49.0 / 1200.0)), note, "49 cents flat left its note");
+            expectEquals(PitchSnap::nearestNote(hz * std::exp2(51.0 / 1200.0)), note + 1, "51 cents sharp did not move up");
+        }
+
+        // In Hz the halfway point between C1 and C#1 is 67.35; in pitch it is 67.32. A value
+        // between them separates the two notions of "nearest".
+        expectEquals(PitchSnap::nearestNote(67.33), 37, "Nearest is being measured in Hz, not in pitch");
+    }
+
+    void testSnapWithinARange()
+    {
+        beginTest("(b) Snapping inside a range steps inward at the edges");
+
+        // The canvas's pitch range is 20-220 Hz. 20 Hz is nearest MIDI 15 (D#-1 in Ableton's naming,
+        // 19.45 Hz), which is outside it; the next note up, MIDI 16 (E-1, 20.60 Hz), is the answer.
+        const double low = PitchSnap::snapWithin(20.0, 20.0, 220.0);
+        expectWithinAbsoluteError(low, PitchSnap::noteToFrequency(16), 1.0e-9, "Did not step up to E-1 at the floor");
+
+        expectWithinAbsoluteError(PitchSnap::snapWithin(220.0, 20.0, 220.0), 220.0, 1.0e-9,
+                                  "A3, exactly the ceiling, did not snap to itself");
+
+        // No note fits in a range narrower than a semitone: returned clamped, not off in the weeds.
+        expectWithinAbsoluteError(PitchSnap::snapWithin(100.0, 99.0, 101.0), 100.0, 1.0e-9,
+                                  "A range holding no note did not return the value unsnapped");
+    }
+
+    // Flat at a snapped value. Measured, not computed: this is what reaches the speaker.
+    void testSnappedNodePlaysItsNote()
+    {
+        beginTest("(c) A snapped node plays exactly its note, through tuning and keytracking");
+
+        const double drawn = PitchSnap::snap(67.0); // C1, 65.41 Hz
+        expectWithinAbsoluteError(drawn, PitchSnap::noteToFrequency(36), 1.0e-9);
+
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0, drawn);
+        pitch.setKeytrack(0, true);
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+
+        struct Case { int note; float cents; double expected; };
+        for (const auto c : { Case { 60, 0.0f,  PitchSnap::noteToFrequency(36) },
+                              Case { 67, 0.0f,  PitchSnap::noteToFrequency(43) },   // keytracked up a fifth
+                              Case { 60, 30.0f, PitchSnap::noteToFrequency(36) * std::exp2(30.0 / 1200.0) } })
+        {
+            const auto out = Phase6Fixtures::render(snapshot, c.note, (int) (kSr * 1.0), 60, c.cents);
+            const double measured = Phase6Fixtures::measureFrequency(out, 0.05, 0.95);
+            expect(std::abs(measured - c.expected) < c.expected * 1.0e-4,
+                   "Note " + juce::String(c.note) + " at " + juce::String(c.cents, 0) + " cents plays "
+                       + juce::String(measured, 4) + " Hz, expected " + juce::String(c.expected, 4));
+        }
+    }
+
+    void testNoteNames()
+    {
+        beginTest("(d) Note names follow Ableton: middle C is C3");
+
+        expectEquals(PitchSnap::noteName(60),  juce::String("C3"));
+        expectEquals(PitchSnap::noteName(61),  juce::String("C#3"));
+        expectEquals(PitchSnap::noteName(36),  juce::String("C1"));
+        expectEquals(PitchSnap::noteName(21),  juce::String("A-1"));
+        expectEquals(PitchSnap::noteName(0),   juce::String("C-2"));
+        expectEquals(PitchSnap::noteName(127), juce::String("G8"));
+    }
+};
+
+static Phase6PitchSnapTest phase6PitchSnapTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

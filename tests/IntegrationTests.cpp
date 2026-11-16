@@ -6,6 +6,7 @@
 #include "EnvelopeCanvas.h"
 #include "PluginEditor.h"
 #include "ClickPanel.h"
+#include "PitchSnap.h"
 
 #include <juce_dsp/juce_dsp.h> // FFT for Phase5VerifyTest (c)
 
@@ -3610,6 +3611,122 @@ public:
 };
 
 static Phase6HarmonicsEngineTest phase6HarmonicsEngineTest;
+
+// Phase6CanvasSnapTest — the canvas applies pitch snap to real mouse gestures: a double-click add
+// and a node drag both land a pitch node exactly on a note while snap is on, and do not while it
+// is off. Amp nodes are never snapped.
+class Phase6CanvasSnapTest : public juce::UnitTest
+{
+public:
+    Phase6CanvasSnapTest() : juce::UnitTest("Phase6CanvasSnap") {}
+
+    void runTest() override
+    {
+        testAddSnaps();
+        testDragSnaps();
+    }
+
+private:
+    static juce::MouseEvent mouseEventAt(juce::Component* c, juce::Point<float> position,
+                                          int clicks = 1, bool wasDragged = false)
+    {
+        return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), position,
+                                 juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                 c, c, juce::Time::getCurrentTime(), position,
+                                 juce::Time::getCurrentTime(), clicks, wasDragged);
+    }
+
+    static EnvelopeCanvas* canvasIn(juce::Component& editor)
+    {
+        for (auto* child : editor.getChildren())
+            if (auto* canvas = dynamic_cast<EnvelopeCanvas*>(child))
+                return canvas;
+        return nullptr;
+    }
+
+    // Whether hz sits on a note to within a thousandth of a cent - i.e. it was snapped, since an
+    // unsnapped mouse position lands there by chance with negligible probability.
+    static bool onANote(double hz) { return std::abs(PitchSnap::centsFromNearest(hz)) < 1.0e-3; }
+
+    // The new pitch node is whichever one is not one of the two factory nodes.
+    static int addedNodeIndex(const EnvelopeModel& model)
+    {
+        for (int i = 0; i < model.getNumNodes(); ++i)
+        {
+            const auto n = model.getNode(i);
+            if (n.time > 0.01 && n.time < 0.29)
+                return i;
+        }
+        return -1;
+    }
+
+    void testAddSnaps()
+    {
+        beginTest("(a) A double-click add lands on a note with snap on, and not with it off");
+
+        for (const bool snap : { true, false })
+        {
+            DOOFAudioProcessor processor;
+            std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
+            editor->setBounds(0, 0, 800, 600);
+
+            auto* canvas = canvasIn(*editor);
+            expect(canvas != nullptr, "No canvas in the editor");
+            if (canvas == nullptr)
+                return;
+
+            canvas->setPitchSnap(snap);
+            canvas->mouseDoubleClick(mouseEventAt(canvas, { canvas->getWidth() * 0.3f, canvas->getHeight() * 0.43f }, 2));
+
+            const auto& pitch = processor.getLayer(0).pitchModel;
+            const int added = addedNodeIndex(pitch);
+            expect(added >= 0, "The double-click did not add a pitch node");
+            if (added < 0)
+                return;
+
+            const double value = pitch.getNode(added).value;
+            expect(onANote(value) == snap, juce::String(snap ? "Snap on" : "Snap off") + ": the added node is at "
+                                               + juce::String(value, 4) + " Hz, "
+                                               + juce::String(PitchSnap::centsFromNearest(value), 3) + " cents from a note");
+        }
+    }
+
+    // The factory pitch node 0 sits at (0 s, 150 Hz). The canvas maps 20-220 Hz linearly over its
+    // height, so it is at y = height * (1 - 130/200) - computed from the live height rather than
+    // a constant, so a layout change cannot make this quietly miss the node.
+    void testDragSnaps()
+    {
+        beginTest("(b) Dragging a pitch node lands it on a note with snap on");
+
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
+        editor->setBounds(0, 0, 800, 600);
+
+        auto* canvas = canvasIn(*editor);
+        if (canvas == nullptr)
+            return;
+
+        canvas->setPitchSnap(true);
+
+        const juce::Point<float> node { 0.0f, canvas->getHeight() * (1.0f - 130.0f / 200.0f) };
+        canvas->mouseDown(mouseEventAt(canvas, node));
+        canvas->mouseDrag(mouseEventAt(canvas, { 10.0f, canvas->getHeight() * 0.47f }, 1, true));
+        canvas->mouseUp(mouseEventAt(canvas, { 10.0f, canvas->getHeight() * 0.47f }, 1, true));
+
+        const auto& pitch = processor.getLayer(0).pitchModel;
+        const double value = pitch.getNode(0).value;
+
+        expect(std::abs(value - 150.0) > 1.0, "The drag did not move node 0 - the test missed the node");
+        expect(onANote(value), "The dragged node is at " + juce::String(value, 4) + " Hz, "
+                                   + juce::String(PitchSnap::centsFromNearest(value), 3) + " cents from a note");
+
+        // Amp nodes are never snapped: the amp factory node 1 at (2 ms, 1.0) must move freely.
+        const auto& amp = processor.getLayer(0).ampModel;
+        expectWithinAbsoluteError(amp.getNode(1).value, 1.0, 1.0e-12, "An amp node was touched by a pitch drag");
+    }
+};
+
+static Phase6CanvasSnapTest phase6CanvasSnapTest;
 
 
 

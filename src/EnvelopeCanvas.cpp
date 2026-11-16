@@ -2,6 +2,7 @@
 #include "BezierSegment.h"
 #include "DefaultEnvelopes.h"
 #include "EnvelopeEvaluator.h"
+#include "PitchSnap.h"
 #include <cmath>
 
 EnvelopeCanvas::EnvelopeCanvas(EnvelopeModel& pitchModelIn, juce::Range<double> pitchRangeIn,
@@ -312,6 +313,8 @@ void EnvelopeCanvas::showContextMenu(NodeHit hit)
     juce::PopupMenu menu;
     if (hit.index != -1)
         menu.addItem("Delete Node", [this, hit] { deleteNodeAt(hit); });
+    if (hit.index != -1 && hit.isPitch)
+        menu.addItem("Snap to Nearest Note", [this, hit] { snapNodeToNote(hit.index); });
     menu.addItem("Reset Curve", [this, isPitch] { resetCurve(isPitch); });
     menu.addItem("Copy Curve",  [this, isPitch] { copyCurve(isPitch); });
     menu.addItem("Paste Curve", [this, isPitch] { pasteCurve(isPitch); });
@@ -458,8 +461,11 @@ void EnvelopeCanvas::mouseDoubleClick(const juce::MouseEvent& e)
     const bool useLog   = (activeCurve == ActiveCurve::pitch) && pitchLogScale;
 
     const double time  = juce::jlimit(0.0, model.getLength(), xToTime(e.position.x));
-    const double value = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
-                                       yToValue(e.position.y, valueRange, useLog));
+    double value = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
+                                 yToValue(e.position.y, valueRange, useLog));
+
+    if (pitchSnap && activeCurve == ActiveCurve::pitch)
+        value = PitchSnap::snapWithin(value, valueRange.getStart(), valueRange.getEnd());
 
     model.addNode(time, value);
     repaint();
@@ -474,8 +480,11 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
         const bool useLog = draggingPitch && pitchLogScale;
 
         const double newTime  = juce::jlimit(0.0, model.getLength(), xToTime(e.position.x));
-        const double newValue = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
-                                              yToValue(e.position.y, valueRange, useLog));
+        double newValue = juce::jlimit(valueRange.getStart(), valueRange.getEnd(),
+                                        yToValue(e.position.y, valueRange, useLog));
+
+        if (pitchSnap && draggingPitch)
+            newValue = PitchSnap::snapWithin(newValue, valueRange.getStart(), valueRange.getEnd());
 
         // moveNode can return a different index than the one passed in, when
         // the drag crosses a neighbouring node's time and the model re-sorts
@@ -485,7 +494,7 @@ void EnvelopeCanvas::mouseDrag(const juce::MouseEvent& e)
 
         readoutPos  = toPixel(newTime, newValue, valueRange, useLog);
         readoutText = draggingPitch
-                        ? juce::String(newValue, 1) + " Hz"
+                        ? pitchReadout(newValue)
                         : juce::String(newValue, 3);
         readoutText += "  @ " + juce::String(newTime * 1000.0, 1) + " ms";
 
@@ -659,5 +668,29 @@ void EnvelopeCanvas::mouseWheelMove(const juce::MouseEvent& e, const juce::Mouse
     viewStartTime = anchorTime - anchorFraction * viewDuration;
     clampView();
 
+    repaint();
+}
+
+juce::String EnvelopeCanvas::pitchReadout(double hz)
+{
+    const auto name = PitchSnap::noteName(PitchSnap::nearestNote(hz));
+    const double cents = PitchSnap::centsFromNearest(hz);
+
+    // Within half a cent reads as on the note: the drawn value is only shown to 0.01 Hz anyway.
+    if (std::abs(cents) < 0.5)
+        return name + "  " + juce::String(hz, 2) + " Hz";
+
+    return juce::String(hz, 1) + " Hz  " + name + (cents > 0.0 ? " +" : " ") + juce::String(juce::roundToInt(cents)) + "c";
+}
+
+void EnvelopeCanvas::snapNodeToNote(int index)
+{
+    auto& model = *pitchModel;
+    if (! juce::isPositiveAndBelow(index, model.getNumNodes()))
+        return;
+
+    const auto node = model.getNode(index);
+    const double snapped = PitchSnap::snapWithin(node.value, pitchRange.getStart(), pitchRange.getEnd());
+    model.moveNode(index, node.time, snapped);
     repaint();
 }

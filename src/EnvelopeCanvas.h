@@ -66,6 +66,12 @@ public:
     // cannot affect audio (drawEnvelope's model parameter is a const&).
     void setPitchLogScale(bool shouldUseLog);
 
+    // Pitch snap (§3.5): while on, a pitch node being dragged or added lands on the nearest note
+    // (PitchSnap - at A4 = 440 in drawn values, so the played pitch is on the master-tuned grid).
+    // Amp nodes are never snapped. Only affects edits from here on; nothing already drawn moves.
+    void setPitchSnap(bool shouldSnap) { pitchSnap = shouldSnap; }
+    bool isPitchSnapOn() const { return pitchSnap; }
+
     // Called after either model's Length changes via the canvas handle drag,
     // so external UI (e.g. the editor's numeric fields) can refresh. Not
     // called for changes made some other way (e.g. directly via the model).
@@ -227,6 +233,14 @@ private:
 
     juce::AudioProcessor& processor;
     bool pitchLogScale = false;
+    bool pitchSnap = false;
+
+    // The pitch readout while dragging: "C1  65.41 Hz" on a note, "67.0 Hz  C1 +42c" between.
+    static juce::String pitchReadout(double hz);
+
+    // Snaps a node to its nearest note in one undoable step - the context menu's one-off version
+    // of the toggle, for a node drawn before snap was on.
+    void snapNodeToNote(int index);
     ActiveCurve activeCurve = ActiveCurve::pitch;
 
     // Drag state: which node (if any) is currently being dragged, and which
