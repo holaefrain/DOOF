@@ -18,6 +18,21 @@
 class SubVoice
 {
 public:
+    // Which harmonics the series uses (§3.1: "Sub harmonics ... plus presets"). The numbering
+    // becomes the layerN.sub.harmPreset choice list, so like ClickVoice::Type it is append-only.
+    enum class HarmonicSet
+    {
+        all = 0, // 2nd through 8th
+        odd,     // 3rd, 5th, 7th - hollow, square-ish
+        even,    // 2nd, 4th, 6th, 8th - fuller, octave-heavy
+        octaves  // 2nd, 4th, 8th only - the cleanest reinforcement
+    };
+    static constexpr int kNumHarmonicSets = 4;
+
+    // Highest harmonic the series reaches. Eight keeps a kick's harmonics in the range where they
+    // add presence rather than fizz, and bounds the per-sample cost.
+    static constexpr int kMaxHarmonic = 8;
+
     // Prepare the voice for playback at the given sample rate.
     // Must be called before any processSample() or noteOn() calls.
     void prepare(double sampleRate);
@@ -52,6 +67,19 @@ public:
     // playing, letting go of the previous key never cuts the new note short. Without sustain mode
     // this changes nothing - the envelope plays to its end whether or not the key is held.
     void noteOff(int midiNote);
+
+    // Harmonics for the next note (§3.1). gain is the level of the first harmonic in the set,
+    // relative to the fundamental; each further one in the set is ratio times the one before;
+    // decaySeconds is how long they take to die away, after which the sound is the clean sine
+    // alone - a real duration, the same semantics as ClickVoice's decay. A gain of 0 skips the
+    // harmonics entirely. Latched at note-on, like setTuning.
+    void setHarmonics(float gain, float ratio, double decaySeconds, HarmonicSet set)
+    {
+        pendingHarmGain = gain;
+        pendingHarmRatio = ratio;
+        pendingHarmDecay = decaySeconds;
+        pendingHarmSet = set;
+    }
 
     // Trigger a new note.  If the voice is already playing, initiates the choke
     // fade and queues midiNote to start after the fade completes. The note's
@@ -131,6 +159,36 @@ private:
     // Latched by startBody for the note now playing.
     double semitoneShift = 0.0; // played note minus key root
     double tuneRatio     = 1.0; // 2^(cents / 1200)
+
+    // ── Harmonics (Phase 6) ───────────────────────────────────────────────────
+    float       pendingHarmGain  = 0.0f;
+    float       pendingHarmRatio = 0.5f;
+    double      pendingHarmDecay = 0.15;
+    HarmonicSet pendingHarmSet   = HarmonicSet::all;
+
+    // Latched by startBody: each harmonic's level (index = harmonic number; 0 and 1 unused, and 0
+    // for any harmonic outside the set), the decay rate, and how many samples the harmonics last.
+    double      harmLevel[kMaxHarmonic + 1] {};
+    bool        harmonicsOn      = false;
+    double      harmDecayK       = 0.0;
+    juce::int64 harmDecaySamples = 0;
+
+    // Samples since this note's body began. Unlike envSamples it never jumps back at a sustain
+    // wrap, so the harmonics keep fading through a held loop rather than restarting each pass.
+    juce::int64 noteSamples = 0;
+
+    // Level at which the harmonics are considered gone, matching kIdleThreshold (~-80 dB).
+    static constexpr double kHarmSilenceLevel = 1e-4;
+
+    // Where a harmonic starts fading out, and where it is gone, as fractions of the sample rate.
+    // Above the ceiling a harmonic would alias back down as an unrelated tone; the fade keeps a
+    // pitch sweep from switching one off with a step.
+    static constexpr double kHarmFadeStartRatio = 0.40;
+    static constexpr double kHarmCeilingRatio   = 0.45;
+
+    // The oscillator's output at `phase` before the amp envelope: the sine, plus the harmonic
+    // series for as long as it lasts. `frequency` is the fundamental, for the aliasing guard.
+    double waveform(double phase, double frequency) const;
 
     // Ceiling on the oscillator frequency, as a fraction of the sample rate. A note keytracked far
     // above the root can push a node past Nyquist, where a sine folds back as an unrelated pitch;

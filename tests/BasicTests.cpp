@@ -2397,6 +2397,282 @@ private:
 
 static Phase6SustainTest phase6SustainTest;
 
+// Phase6HarmonicsTest — the harmonic series above the Sub's sine (§3.1: Gain / Ratio / Decay + presets).
+//   (a) Gain 0 is the plain sine, bit for bit.
+//   (b) Each preset puts energy in exactly its own harmonics.
+//   (c) The first harmonic present sits at Gain, and each further one at Ratio times the last.
+//   (d) Decay is a real duration: afterwards the output is the plain sine again, bit for bit.
+//   (e) Harmonics near Nyquist are dropped rather than folding back as aliases.
+//   (f) Latched at note-on.
+//
+// Levels are read with a Hann-windowed Goertzel filter over windows holding a whole number of
+// cycles of a flat 100 Hz tone, so every harmonic lands exactly on a bin. The window matters: the
+// harmonics decay within the measurement, and a decaying tone measured through a plain rectangular
+// window smears into its neighbours' bins at around -50 dB - enough to make an absent harmonic look
+// present. Hann's sidelobes are below -90 dB ten bins out, where the next harmonic sits.
+class Phase6HarmonicsTest : public juce::UnitTest
+{
+public:
+    Phase6HarmonicsTest() : juce::UnitTest("Phase6Harmonics") {}
+
+    void runTest() override
+    {
+        testZeroGainIsThePlainSine();
+        testPresetsSelectTheirHarmonics();
+        testGainAndRatioSetTheLevels();
+        testDecayIsARealDuration();
+        testNoAliasing();
+        testLatchedAtNoteOn();
+    }
+
+private:
+    static constexpr double kSr = Phase6Fixtures::kSampleRate;
+    using Set = SubVoice::HarmonicSet;
+
+    struct Settings { float gain = 0.5f, ratio = 0.5f; double decay = 2.0; Set set = Set::all; };
+
+    static EnvelopeSnapshot flatTone(double hz)
+    {
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0, hz);
+        Phase6Fixtures::flatAmp(amp);
+        return Phase6Fixtures::snapshotOf(pitch, amp);
+    }
+
+    static std::vector<float> render(const EnvelopeSnapshot& snapshot, Settings h, int numSamples)
+    {
+        SubVoice voice;
+        voice.prepare(kSr);
+        voice.setSnapshot(&snapshot);
+        voice.setTuning(60, 0.0f);
+        voice.setHarmonics(h.gain, h.ratio, h.decay, h.set);
+        voice.noteOn(60);
+
+        std::vector<float> out((std::size_t) numSamples);
+        for (auto& s : out)
+            s = voice.processSample();
+        return out;
+    }
+
+    // Periodic Hann weight for sample n of a count-sample window.
+    static double hann(int n, int count)
+    {
+        return 0.5 * (1.0 - std::cos(juce::MathConstants<double>::twoPi * n / count));
+    }
+
+    // Amplitude of the component at `hz` over [from, from + count), by Hann-windowed Goertzel.
+    // Scaled by the window's sum, so a steady on-bin tone of amplitude A reads exactly A.
+    static double amplitudeAt(const std::vector<float>& buf, double hz, int from, int count)
+    {
+        const double w = juce::MathConstants<double>::twoPi * hz / kSr;
+        const double coeff = 2.0 * std::cos(w);
+        double s1 = 0.0, s2 = 0.0, windowSum = 0.0;
+
+        for (int n = 0; n < count; ++n)
+        {
+            const double weight = hann(n, count);
+            windowSum += weight;
+
+            const double s0 = buf[(std::size_t) (from + n)] * weight + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+
+        const double power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+        return 2.0 * std::sqrt(std::max(power, 0.0)) / windowSum;
+    }
+
+    // 10 cycles of 100 Hz exactly.
+    static constexpr int kWindow = 4410;
+
+    static int firstDifference(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (std::memcmp(&a[i], &b[i], sizeof(float)) != 0)
+                return (int) i;
+        return -1;
+    }
+
+    // (a)
+    void testZeroGainIsThePlainSine()
+    {
+        beginTest("(a) Gain 0 renders the plain sine, bit for bit");
+
+        const auto snapshot = flatTone(100.0);
+        Settings off;
+        off.gain = 0.0f;
+
+        SubVoice voice;
+        voice.prepare(kSr);
+        voice.setSnapshot(&snapshot);
+        voice.noteOn(60); // never told about harmonics at all
+
+        std::vector<float> untouched((std::size_t) kWindow);
+        for (auto& s : untouched)
+            s = voice.processSample();
+
+        expectEquals(firstDifference(render(snapshot, off, kWindow), untouched), -1,
+                     "Harmonics at gain 0 changed the sound");
+    }
+
+    // (b)
+    void testPresetsSelectTheirHarmonics()
+    {
+        beginTest("(b) Each preset puts energy in exactly its own harmonics");
+
+        const auto snapshot = flatTone(100.0);
+
+        struct Case { Set set; const char* name; std::vector<int> present; };
+        for (const auto& c : { Case { Set::all,     "All",     { 2, 3, 4, 5, 6, 7, 8 } },
+                               Case { Set::odd,     "Odd",     { 3, 5, 7 } },
+                               Case { Set::even,    "Even",    { 2, 4, 6, 8 } },
+                               Case { Set::octaves, "Octaves", { 2, 4, 8 } } })
+        {
+            Settings h;
+            h.set = c.set;
+            h.ratio = 0.8f; // gentle falloff, so the 8th is still well above the noise floor
+            const auto out = render(snapshot, h, kWindow);
+
+            for (int harmonic = 2; harmonic <= SubVoice::kMaxHarmonic; ++harmonic)
+            {
+                const double level = amplitudeAt(out, 100.0 * harmonic, 0, kWindow);
+                const bool shouldBe = std::find(c.present.begin(), c.present.end(), harmonic) != c.present.end();
+
+                if (shouldBe)
+                    expect(level > 0.05, juce::String(c.name) + ": harmonic " + juce::String(harmonic)
+                                             + " is missing (" + juce::String(level, 5) + ")");
+                else
+                    expect(level < 1.0e-4, juce::String(c.name) + ": harmonic " + juce::String(harmonic)
+                                               + " is present (" + juce::String(level, 5) + ") but not in the set");
+            }
+        }
+    }
+
+    // (c) Measured against the fundamental in the same window, so the shared decay envelope and
+    // the amp envelope cancel out of the ratio entirely.
+    void testGainAndRatioSetTheLevels()
+    {
+        beginTest("(c) First harmonic at Gain against the fundamental, each next one Ratio times the last");
+
+        const auto snapshot = flatTone(100.0);
+
+        for (const auto& c : { Settings { 0.5f, 0.5f, 2.0, Set::all },
+                               Settings { 0.3f, 0.25f, 2.0, Set::odd },
+                               Settings { 0.8f, 0.7f, 2.0, Set::octaves } })
+        {
+            const auto out = render(snapshot, c, kWindow);
+
+            // The series fades as e^(-kt), k = ln(1e4) / decay, while the fundamental does not, so
+            // the first harmonic reads as gain times that envelope's Hann-weighted average over
+            // the window. Every later harmonic shares the envelope, so it cancels from their ratios.
+            const double k = std::log(1.0e4) / c.decay;
+            double weighted = 0.0, weights = 0.0;
+            for (int n = 0; n < kWindow; ++n)
+            {
+                weighted += hann(n, kWindow) * std::exp(-k * n / kSr);
+                weights  += hann(n, kWindow);
+            }
+            const double meanEnvelope = weighted / weights;
+
+            const double fundamental = amplitudeAt(out, 100.0, 0, kWindow);
+            expectWithinAbsoluteError(fundamental, 1.0, 1.0e-3, "The fundamental is not at full level");
+
+            std::vector<int> set;
+            for (int harmonic = 2; harmonic <= SubVoice::kMaxHarmonic; ++harmonic)
+                if (amplitudeAt(out, 100.0 * harmonic, 0, kWindow) > 1.0e-4)
+                    set.push_back(harmonic);
+
+            double expected = c.gain * meanEnvelope;
+            for (const int harmonic : set)
+            {
+                const double level = amplitudeAt(out, 100.0 * harmonic, 0, kWindow) / fundamental;
+                expect(std::abs(level - expected) < expected * 1.0e-3 + 1.0e-6,
+                       "Harmonic " + juce::String(harmonic) + " at gain " + juce::String(c.gain, 2)
+                           + ", ratio " + juce::String(c.ratio, 2) + ": " + juce::String(level, 6)
+                           + " against an expected " + juce::String(expected, 6));
+                expected *= c.ratio;
+            }
+        }
+    }
+
+    // (d)
+    void testDecayIsARealDuration()
+    {
+        beginTest("(d) After Decay the output is the plain sine again, bit for bit");
+
+        const auto snapshot = flatTone(100.0);
+        Settings plain;
+        plain.gain = 0.0f;
+
+        for (const double decay : { 0.02, 0.15 })
+        {
+            Settings h;
+            h.decay = decay;
+            const int length = (int) (kSr * (decay + 0.1));
+
+            const auto with = render(snapshot, h, length);
+            const auto without = render(snapshot, plain, length);
+            const int end = (int) std::ceil(decay * kSr);
+
+            const int differs = firstDifference(with, without);
+            expect(differs >= 0 && differs < end / 4, "Harmonics are not audible at the start of a "
+                                                         + juce::String(decay * 1000.0, 0) + " ms decay");
+
+            int lastDiff = -1;
+            for (int i = 0; i < length; ++i)
+                if (std::memcmp(&with[(std::size_t) i], &without[(std::size_t) i], sizeof(float)) != 0)
+                    lastDiff = i;
+
+            expect(lastDiff < end, "Harmonics are still sounding at sample " + juce::String(lastDiff)
+                                       + ", past their " + juce::String(decay * 1000.0, 0)
+                                       + " ms decay (sample " + juce::String(end) + ")");
+            expect(lastDiff > end - (int) (kSr * 0.01), "Harmonics stopped well before their decay ended");
+        }
+    }
+
+    // (e) A 3 kHz fundamental at 44.1 kHz: the 7th (21 kHz) and 8th (24 kHz) are above the 19.8 kHz
+    // ceiling. The 8th would fold back to 20.1 kHz, so that frequency is checked as well.
+    void testNoAliasing()
+    {
+        beginTest("(e) Harmonics above the ceiling are dropped, not aliased");
+
+        const auto snapshot = flatTone(3000.0);
+        Settings h;
+        h.ratio = 1.0f; // no falloff: an alias would be as loud as the harmonic it came from
+        const int count = 4410; // 300 cycles of 3 kHz exactly
+        const auto out = render(snapshot, h, count);
+
+        expect(amplitudeAt(out, 15000.0, 0, count) > 0.1, "The 5th harmonic (15 kHz) is missing");
+        for (const double hz : { 21000.0, 44100.0 - 24000.0 })
+            expect(amplitudeAt(out, hz, 0, count) < 1.0e-4,
+                   "Energy at " + juce::String(hz, 0) + " Hz - a harmonic above the ceiling is sounding or aliasing");
+    }
+
+    // (f)
+    void testLatchedAtNoteOn()
+    {
+        beginTest("(f) Harmonic settings are latched at note-on");
+
+        const auto snapshot = flatTone(100.0);
+
+        SubVoice voice;
+        voice.prepare(kSr);
+        voice.setSnapshot(&snapshot);
+        voice.setHarmonics(0.0f, 0.5f, 2.0, Set::all);
+        voice.noteOn(60);
+        voice.setHarmonics(0.9f, 0.5f, 2.0, Set::all);
+
+        std::vector<float> out((std::size_t) kWindow);
+        for (auto& s : out)
+            s = voice.processSample();
+
+        expect(amplitudeAt(out, 200.0, 0, kWindow) < 1.0e-4,
+               "Raising gain mid-note added harmonics to the note already playing");
+    }
+};
+
+static Phase6HarmonicsTest phase6HarmonicsTest;
+
 // ── Test runner entry point ────────────────────────────────────────────────────
 
 // Runs all registered juce::UnitTest subclasses and returns a non-zero exit code

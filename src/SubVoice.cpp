@@ -1,4 +1,6 @@
 #include "SubVoice.h"
+#include <algorithm>
+#include <iterator>
 
 // Reset all runtime state and store the sample rate.
 // Must be called before audio processing begins (e.g. in prepareToPlay).
@@ -121,7 +123,8 @@ float SubVoice::processSample()
     {
         // Clamp fadeProgress to [0, 1] so the last sample always reaches silence.
         double fadeProgress = std::min(chokeTimer / kChokeFadeSec, 1.0);
-        output = (float)(std::sin(phase) * chokeAmp * (1.0 - fadeProgress));
+        output = (float)(waveform(phase, chokeFreq) * chokeAmp * (1.0 - fadeProgress));
+        ++noteSamples;
 
         // Continue advancing the oscillator at the captured choke frequency so
         // there is no phase discontinuity when the new body starts.
@@ -148,13 +151,14 @@ float SubVoice::processSample()
         double amp, pitch;
         currentEnvelope(amp, pitch);
 
-        output = (float)(std::sin(phase) * amp);
+        output = (float)(waveform(phase, pitch) * amp);
 
         phase += juce::MathConstants<double>::twoPi * pitch / sampleRate;
         if (phase >= juce::MathConstants<double>::twoPi)
             phase -= juce::MathConstants<double>::twoPi;
 
         ++envSamples;
+        ++noteSamples;
 
         // The phase accumulator carries straight on across the jump, so the waveform stays
         // continuous; only the envelope position moves.
@@ -181,6 +185,50 @@ float SubVoice::processSample()
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
+
+// sin(phase), plus the harmonic series while it lasts. sin(h * phase) comes from the Chebyshev
+// recurrence sin((h+1)x) = 2cos(x)sin(hx) - sin((h-1)x), so the whole series costs one sin and one
+// cos per sample instead of one sin per harmonic. Each harmonic is integer-related to the
+// fundamental's phase, which keeps the series locked to it through any pitch sweep - and makes a
+// phase rotation rotate the whole waveform rather than just its fundamental.
+double SubVoice::waveform(double phaseNow, double frequency) const
+{
+    const double fundamental = std::sin(phaseNow);
+
+    // Checked before anything else so that once the harmonics are over - or were never on - the
+    // output is exactly the plain sine, bit for bit.
+    if (! harmonicsOn || noteSamples >= harmDecaySamples)
+        return fundamental;
+
+    const double envelope = std::exp(-((double) noteSamples / sampleRate) * harmDecayK);
+
+    const double twoCos = 2.0 * std::cos(phaseNow);
+    const double fadeStart = sampleRate * kHarmFadeStartRatio;
+    const double ceiling   = sampleRate * kHarmCeilingRatio;
+
+    double previous = 0.0;         // sin(0 * phase)
+    double current  = fundamental; // sin(1 * phase)
+    double series   = 0.0;
+
+    for (int h = 2; h <= kMaxHarmonic; ++h)
+    {
+        const double next = twoCos * current - previous;
+        previous = current;
+        current  = next;
+
+        if (harmLevel[h] == 0.0)
+            continue;
+
+        const double partial = h * frequency;
+        if (partial >= ceiling)
+            break; // every higher harmonic is above it too
+
+        const double guard = partial <= fadeStart ? 1.0 : (ceiling - partial) / (ceiling - fadeStart);
+        series += harmLevel[h] * guard * current;
+    }
+
+    return fundamental + envelope * series;
+}
 
 // The drawn pitch at t, moved by the keytracked share of the note's offset and by master tuning.
 double SubVoice::pitchAt(double t) const
@@ -241,6 +289,36 @@ void SubVoice::startBody(int midiNote, bool keyHeld)
     currentNote   = midiNote;
     held          = keyHeld;
     wrapCommitted = false;
+
+    // Harmonics: each one in the set gets gain x ratio^(its rank in the set), so the first
+    // harmonic present is always at `gain` whichever preset is chosen.
+    harmonicsOn = pendingHarmGain > 0.0f;
+    std::fill(std::begin(harmLevel), std::end(harmLevel), 0.0);
+
+    if (harmonicsOn)
+    {
+        double level = (double) pendingHarmGain;
+        for (int h = 2; h <= kMaxHarmonic; ++h)
+        {
+            const bool inSet = (pendingHarmSet == HarmonicSet::all)
+                            || (pendingHarmSet == HarmonicSet::odd     && (h % 2) == 1)
+                            || (pendingHarmSet == HarmonicSet::even    && (h % 2) == 0)
+                            || (pendingHarmSet == HarmonicSet::octaves && (h & (h - 1)) == 0);
+            if (! inSet)
+                continue;
+
+            harmLevel[h] = level;
+            level *= (double) pendingHarmRatio;
+        }
+
+        // Clamped like ClickVoice's decay: zero would divide by zero, and the ceiling is the
+        // parameter's own maximum.
+        const double decay = juce::jlimit(0.001, 4.0, pendingHarmDecay);
+        harmDecayK = -std::log(kHarmSilenceLevel) / decay;
+        harmDecaySamples = (juce::int64) std::ceil(decay * sampleRate);
+    }
+
+    noteSamples = 0;
 
     phase      = 0.0;
     envSamples = 0;

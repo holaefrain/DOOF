@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_core/juce_core.h>
 #include "ClickVoice.h"
+#include "SubVoice.h"
 
 // ParamIDs — the stable APVTS parameter ID strings, in one place.
 //
@@ -108,4 +109,23 @@ namespace ParamIDs
     // Sustain mode (§3.5): loop between the keytracked nodes while a note is held, then finish the
     // tail on release.
     inline juce::String layerSubSustain (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.sustain"; }
+
+    // Harmonics (§3.1): a series above the fundamental. Gain is the first harmonic's level against
+    // the fundamental, Ratio how quickly each further one falls off, Decay how long they last.
+    inline juce::String layerSubHarmGain   (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.harmGain";   }
+    inline juce::String layerSubHarmRatio  (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.harmRatio";  }
+    inline juce::String layerSubHarmDecay  (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.harmDecay";  }
+    inline juce::String layerSubHarmPreset (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.harmPreset"; }
+
+    // Choice entries for harmPreset, index-aligned with SubVoice::HarmonicSet. Append only - the
+    // same never-reorder rule as every other choice list here.
+    inline juce::StringArray harmPresetChoices() { return { "All", "Odd", "Even", "Octaves" }; }
+
+    static_assert(SubVoice::kNumHarmonicSets == 4, "harmPresetChoices() has drifted from SubVoice::HarmonicSet");
+
+    // Decay range, seconds. Skewed around the default, like the click decay: the useful range is
+    // short, a long one is occasionally wanted for a buzzy tail.
+    static constexpr float subHarmDecayMinSeconds     = 0.005f;
+    static constexpr float subHarmDecayMaxSeconds     = 2.0f;
+    static constexpr float subHarmDecayDefaultSeconds = 0.15f;
 }

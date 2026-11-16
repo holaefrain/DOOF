@@ -99,6 +99,9 @@ private:
     // callers (the Phase 5 panel, tests) go through the parameter itself, so this stays private.
     static juce::NormalisableRange<float> clickDecayRange();
 
+    // Likewise for every layer's sub.harmDecay.
+    static juce::NormalisableRange<float> harmDecayRange();
+
     // Renders and mixes one contiguous span of the current block: every layer's voice ticked and
     // summed through its smoothed gain, then master gain and the DC blocker, written to L+R.
     // processBlock calls this once per gap between MIDI events, which is what makes note-on
@@ -168,7 +171,11 @@ private:
         std::atomic<float>* clickDecay = nullptr;
 
         // Phase 6's Sub controls, likewise read once per block and latched by SubVoice at note-on.
-        std::atomic<float>* subSustain = nullptr;
+        std::atomic<float>* subSustain    = nullptr;
+        std::atomic<float>* subHarmGain   = nullptr;
+        std::atomic<float>* subHarmRatio  = nullptr;
+        std::atomic<float>* subHarmDecay  = nullptr;
+        std::atomic<float>* subHarmPreset = nullptr;
     };
 
     std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;

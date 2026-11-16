@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <functional>
 #include <vector>
 
 // IntegrationTests — full-engine tests that need the real PluginProcessor
@@ -128,6 +129,7 @@ public:
         testDefaultsPreserveThePrePhase4Patch();
         testClickDefaultsAndRanges();
         testTuningDefaultsAndRanges();
+        testHarmonicsDefaultsAndRanges();
     }
 
 private:
@@ -138,7 +140,7 @@ private:
 
     void testAllExpectedParametersExist()
     {
-        beginTest("(a) All 43 expected parameter IDs exist, and nothing extra");
+        beginTest("(a) All 63 expected parameter IDs exist, and nothing extra");
 
         DOOFAudioProcessor processor;
 
@@ -160,10 +162,14 @@ private:
 
             // Phase 6.
             expected.add("layer" + n + ".sub.sustain");
+            expected.add("layer" + n + ".sub.harmGain");
+            expected.add("layer" + n + ".sub.harmRatio");
+            expected.add("layer" + n + ".sub.harmDecay");
+            expected.add("layer" + n + ".sub.harmPreset");
         }
 
-        expectEquals(expected.size(), 43,
-                     "3 globals + 5 layers x (4 mixer + 3 click + 1 sub) controls");
+        expectEquals(expected.size(), 63,
+                     "3 globals + 5 layers x (4 mixer + 3 click + 5 sub) controls");
 
         for (const auto& id : expected)
             expect(processor.apvts.getParameter(id) != nullptr,
@@ -289,6 +295,44 @@ private:
         expectEquals(ParamIDs::noteName(36), juce::String("C1"));
         expectEquals(ParamIDs::noteName(0),  juce::String("C-2"));
         expectEquals(ParamIDs::noteName(69), juce::String("A3"));
+    }
+
+    // (e) Harmonics: gain defaulting to 0 is what keeps the factory patch a clean sine, and the
+    // preset list is fixed at four entries for the same reason the click list is fixed at eight.
+    void testHarmonicsDefaultsAndRanges()
+    {
+        beginTest("(e) Harmonics: gain 0-1 at 0, ratio 0-1 at 0.5, skewed decay, 4-entry preset list");
+
+        DOOFAudioProcessor processor;
+
+        for (int i = 1; i <= kExpectedLayers; ++i)
+        {
+            const auto n = juce::String(i);
+            auto* gain   = dynamic_cast<juce::AudioParameterFloat*>(processor.apvts.getParameter("layer" + n + ".sub.harmGain"));
+            auto* ratio  = dynamic_cast<juce::AudioParameterFloat*>(processor.apvts.getParameter("layer" + n + ".sub.harmRatio"));
+            auto* decay  = dynamic_cast<juce::AudioParameterFloat*>(processor.apvts.getParameter("layer" + n + ".sub.harmDecay"));
+            auto* preset = dynamic_cast<juce::AudioParameterChoice*>(processor.apvts.getParameter("layer" + n + ".sub.harmPreset"));
+            auto* sustain = dynamic_cast<juce::AudioParameterBool*>(processor.apvts.getParameter("layer" + n + ".sub.sustain"));
+
+            expect(gain != nullptr && ratio != nullptr && decay != nullptr && preset != nullptr && sustain != nullptr,
+                   "layer" + n + "'s sub parameters have the wrong types");
+            if (gain == nullptr || ratio == nullptr || decay == nullptr || preset == nullptr || sustain == nullptr)
+                return;
+
+            expectWithinAbsoluteError(gain->get(),  0.0f, 1.0e-6f, "Harmonics must default off");
+            expectWithinAbsoluteError(gain->range.end, 1.0f, 1.0e-6f);
+            expectWithinAbsoluteError(ratio->get(), 0.5f, 1.0e-6f);
+            expectWithinAbsoluteError(decay->get(), ParamIDs::subHarmDecayDefaultSeconds, 1.0e-6f);
+            expectWithinAbsoluteError(decay->range.convertFrom0to1(0.5f), ParamIDs::subHarmDecayDefaultSeconds, 1.0e-4f,
+                                      "Half travel of Decay should land on its default");
+
+            expectEquals(preset->choices.size(), 4, "The harmonics preset list must stay at 4 entries");
+            expectEquals(preset->choices[0], juce::String("All"));
+            expectEquals(preset->choices[3], juce::String("Octaves"));
+            expectEquals(preset->getIndex(), 0);
+
+            expect(! sustain->get(), "Sustain must default off");
+        }
     }
 };
 
@@ -3489,6 +3533,69 @@ private:
 };
 
 static Phase6SustainEngineTest phase6SustainEngineTest;
+
+// Phase6HarmonicsEngineTest — the harmonics parameters reach the voice through the processor. The
+// series itself is pinned in the lean target (Phase6HarmonicsTest); this proves the wiring, which a
+// voice-level test cannot.
+class Phase6HarmonicsEngineTest : public juce::UnitTest
+{
+public:
+    Phase6HarmonicsEngineTest() : juce::UnitTest("Phase6HarmonicsEngine") {}
+
+    void runTest() override
+    {
+        beginTest("Each harmonics parameter changes the render of the layer it belongs to");
+
+        auto render = [](std::function<void(DOOFAudioProcessor&)> configure)
+        {
+            DOOFAudioProcessor processor;
+            configure(processor);
+            processor.prepareToPlay(44100.0, 4096);
+
+            juce::AudioBuffer<float> buffer(2, 4096);
+            juce::MidiBuffer midi;
+            midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+            processor.processBlock(buffer, midi);
+            return std::vector<float>(buffer.getReadPointer(0), buffer.getReadPointer(0) + 4096);
+        };
+
+        auto set = [](DOOFAudioProcessor& p, const juce::String& id, float value)
+        {
+            auto* param = p.apvts.getParameter(id);
+            param->setValueNotifyingHost(param->convertTo0to1(value));
+        };
+
+        auto differs = [](const std::vector<float>& a, const std::vector<float>& b)
+        {
+            for (size_t i = 0; i < a.size(); ++i)
+                if (std::abs(a[i] - b[i]) > 1.0e-4f)
+                    return true;
+            return false;
+        };
+
+        const auto factory = render([](DOOFAudioProcessor&) {});
+        const auto withGain = render([&](DOOFAudioProcessor& p) { set(p, ParamIDs::layerSubHarmGain(0), 0.5f); });
+
+        expect(differs(factory, withGain), "Raising layer 1's harmonics gain did not change its sound");
+
+        // The other three only act through gain, so each is compared against gain alone.
+        expect(differs(withGain, render([&](DOOFAudioProcessor& p) {
+                   set(p, ParamIDs::layerSubHarmGain(0), 0.5f); set(p, ParamIDs::layerSubHarmRatio(0), 0.1f); })),
+               "Ratio did not reach the voice");
+        expect(differs(withGain, render([&](DOOFAudioProcessor& p) {
+                   set(p, ParamIDs::layerSubHarmGain(0), 0.5f); set(p, ParamIDs::layerSubHarmDecay(0), 0.01f); })),
+               "Decay did not reach the voice");
+        expect(differs(withGain, render([&](DOOFAudioProcessor& p) {
+                   set(p, ParamIDs::layerSubHarmGain(0), 0.5f); set(p, ParamIDs::layerSubHarmPreset(0), 1.0f); })),
+               "The preset did not reach the voice");
+
+        // Layer 2's gain must not reach layer 1.
+        expect(! differs(factory, render([&](DOOFAudioProcessor& p) { set(p, ParamIDs::layerSubHarmGain(1), 0.5f); })),
+               "Layer 2's harmonics gain changed layer 1, the only one sounding");
+    }
+};
+
+static Phase6HarmonicsEngineTest phase6HarmonicsEngineTest;
 
 
 

@@ -91,8 +91,14 @@ DOOFAudioProcessor::DOOFAudioProcessor()
         cached.clickTone  = apvts.getRawParameterValue(ParamIDs::layerClickTone(i));
         cached.clickDecay = apvts.getRawParameterValue(ParamIDs::layerClickDecay(i));
 
-        cached.subSustain = apvts.getRawParameterValue(ParamIDs::layerSubSustain(i));
-        jassert(cached.subSustain != nullptr);
+        cached.subSustain    = apvts.getRawParameterValue(ParamIDs::layerSubSustain(i));
+        cached.subHarmGain   = apvts.getRawParameterValue(ParamIDs::layerSubHarmGain(i));
+        cached.subHarmRatio  = apvts.getRawParameterValue(ParamIDs::layerSubHarmRatio(i));
+        cached.subHarmDecay  = apvts.getRawParameterValue(ParamIDs::layerSubHarmDecay(i));
+        cached.subHarmPreset = apvts.getRawParameterValue(ParamIDs::layerSubHarmPreset(i));
+        jassert(cached.subSustain != nullptr && cached.subHarmGain != nullptr
+                 && cached.subHarmRatio != nullptr && cached.subHarmDecay != nullptr
+                 && cached.subHarmPreset != nullptr);
 
         // A null here means an ID in ParamIDs disagrees with the one
         // createParameterLayout() registered — the mixer would then silently
@@ -285,6 +291,36 @@ DOOFAudioProcessor::createParameterLayout()
             "Layer " + layerNumber + " Sustain",
             false
         ));
+
+        // Harmonics. Gain defaults to 0 - harmonics off - so the factory patch is the clean sine
+        // it always was; the other three only matter once gain is raised.
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerSubHarmGain(i), 1 },
+            "Layer " + layerNumber + " Harmonics Gain",
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            0.0f
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerSubHarmRatio(i), 1 },
+            "Layer " + layerNumber + " Harmonics Ratio",
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            0.5f
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerSubHarmDecay(i), 1 },
+            "Layer " + layerNumber + " Harmonics Decay",
+            harmDecayRange(),
+            ParamIDs::subHarmDecayDefaultSeconds
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { ParamIDs::layerSubHarmPreset(i), 1 },
+            "Layer " + layerNumber + " Harmonics Preset",
+            ParamIDs::harmPresetChoices(),
+            (int) SubVoice::HarmonicSet::all
+        ));
     }
 
     return layout;
@@ -293,6 +329,15 @@ DOOFAudioProcessor::createParameterLayout()
 // Skewed so the default 8 ms sits at the centre of the control's travel. §0.5 settles on a log
 // skew for time parameters, and without it the 1-20 ms range §6 actually cares about would be
 // crushed into the bottom third of the knob while the rarely-wanted long end took the rest.
+// Skewed around the default for the same reason as the click decay.
+juce::NormalisableRange<float> DOOFAudioProcessor::harmDecayRange()
+{
+    juce::NormalisableRange<float> range { ParamIDs::subHarmDecayMinSeconds,
+                                           ParamIDs::subHarmDecayMaxSeconds };
+    range.setSkewForCentre(ParamIDs::subHarmDecayDefaultSeconds);
+    return range;
+}
+
 juce::NormalisableRange<float> DOOFAudioProcessor::clickDecayRange()
 {
     juce::NormalisableRange<float> range { ParamIDs::clickDecayMinSeconds,
@@ -398,7 +443,12 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         // loads the atomic pointer once per block, never per-sample).
         layer.subVoice.setSnapshot(layer.publisher.getSnapshot());
         layer.subVoice.setTuning(keyRoot, tuneCents);
-        layer.subVoice.setSustain(layerParams[(size_t) i].subSustain->load() > 0.5f);
+        const auto& cached = layerParams[(size_t) i];
+        layer.subVoice.setSustain(cached.subSustain->load() > 0.5f);
+        layer.subVoice.setHarmonics(cached.subHarmGain->load(), cached.subHarmRatio->load(),
+                                    (double) cached.subHarmDecay->load(),
+                                    (SubVoice::HarmonicSet) juce::jlimit(0, SubVoice::kNumHarmonicSets - 1,
+                                                                         (int) cached.subHarmPreset->load()));
 
         // Click controls likewise: read once here, latched by ClickVoice at the next note-on.
         layerSource[(size_t) i] = configureLayerSource(i);
