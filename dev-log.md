@@ -43,7 +43,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 Decisions made *during build* that supplement or override `project-reference.md §8`.
 (Decisions already locked in §0/§0.5/§8 of the reference doc are not duplicated here.)
 
-_Nothing yet — log decisions here as they are made._
+- **2026-11-16 — The company behind DOOF is 4Eternity.** `COMPANY_NAME` is `4Eternity` (the vendor hosts list DOOF under) and `BUNDLE_ID` is `com.4eternity.doof`. The manufacturer code stays `ECsy`: JUCE derives the VST3 class ID from the manufacturer and plugin codes, so changing either would orphan DOOF in every saved set, and hosts never display it. If it is ever to change to match the new name, it has to happen before DOOF is used in sets anyone cares about.
 
 ---
 

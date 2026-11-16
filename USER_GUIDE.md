@@ -6,7 +6,7 @@ DOOF is under construction, so parts of the interface describe features that exi
 
 ## Loading DOOF
 
-- **VST3**: the build produces `DOOF.vst3`. Install it in your system's VST3 folder (e.g. `~/Library/Audio/Plug-Ins/VST3/` on macOS) and rescan plugins in your DAW.
+- **VST3**: the build produces `DOOF.vst3`. Install it in your system's VST3 folder (e.g. `~/Library/Audio/Plug-Ins/VST3/` on macOS), or in a custom folder your DAW is set to scan, and rescan plugins. DOOF is listed under the vendor **4Eternity**. Use a Release build for anything beyond development — Debug works but costs far more CPU.
 - **Standalone**: run the built `DOOF.app` directly. Standalone has no host play head, so the beat grid never appears there — that needs a real DAW host.
 
 DOOF is played with MIDI notes. A note-on triggers the kick, landing on the exact sample the note arrives at rather than the start of the host's buffer. Retriggering while a note is still ringing chokes the old one and starts the new one cleanly. On a Click layer the new hit starts immediately and the old one fades out underneath it over 5 ms, so fast rolls stay tight.

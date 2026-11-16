@@ -57,9 +57,13 @@ endfunction()
 # IS_SYNTH + NEEDS_MIDI_INPUT configure JUCE's bus/MIDI plumbing for a synth.
 juce_add_plugin(DOOF
     VERSION                     "0.1.0"
-    COMPANY_NAME                "EfrainCuessy"
-    BUNDLE_ID                   "com.efraincuessy.doof"
-    PLUGIN_MANUFACTURER_CODE    ECsy        # 4-char manufacturer code registered with Steinberg
+    COMPANY_NAME                "4Eternity" # vendor shown in host plugin browsers - display only
+    BUNDLE_ID                   "com.4eternity.doof"
+    # The two codes below are DOOF's identity, not labels: JUCE derives the VST3 class ID from
+    # them (VST3Interface::jucePluginId), and a host finds the plugin in a saved set by that ID.
+    # Changing either one makes every existing set lose DOOF. ECsy predates the 4Eternity name
+    # and is kept deliberately - hosts never display it.
+    PLUGIN_MANUFACTURER_CODE    ECsy        # 4-char manufacturer code
     PLUGIN_CODE                 Doof        # 4-char plugin code, unique per product
     FORMATS                     VST3 Standalone
     PRODUCT_NAME                "DOOF"
@@ -71,6 +75,19 @@ juce_add_plugin(DOOF
     COPY_PLUGIN_AFTER_BUILD     FALSE
     VST3_CATEGORIES             "Instrument|Synth"
 )
+
+# Re-sign the VST3 bundle once it is complete. With a Makefile/Ninja generator JUCE ad-hoc signs the
+# bundle and only then writes Contents/Resources/moduleinfo.json into it, which breaks the seal
+# (`codesign --verify`: "a sealed resource is missing or invalid"). JUCE's own copy step re-signs,
+# but COPY_PLUGIN_AFTER_BUILD is off here, so nothing else would. This re-runs JUCE's own check,
+# which replaces an invalid signature with an ad-hoc one. POST_BUILD commands run in the order they
+# are added, and juce_add_plugin has added the manifest step by this point.
+if(APPLE)
+    add_custom_command(TARGET DOOF_VST3 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" "-Dsrc=$<TARGET_BUNDLE_DIR:DOOF_VST3>"
+                "-P" "${JUCE_CMAKE_UTILS_DIR}/checkBundleSigning.cmake"
+        VERBATIM)
+endif()
 
 # Source files compiled into the plugin target.
 target_sources(DOOF
