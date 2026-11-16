@@ -84,6 +84,15 @@ void EnvelopeModel::setControlPoints(int index, double cpOutTime, double cpOutVa
     node.setProperty(EnvelopeIDs::cpInValue,  cpInValue,  &undoManager);
 }
 
+void EnvelopeModel::setKeytrack(int index, bool shouldTrack)
+{
+    jassert(juce::isPositiveAndBelow(index, tree.getNumChildren()));
+    if (!inGesture)
+        undoManager.beginNewTransaction();
+
+    tree.getChild(index).setProperty(EnvelopeIDs::keytrack, shouldTrack, &undoManager);
+}
+
 void EnvelopeModel::setLength(double newLength)
 {
     if (!inGesture)
@@ -107,6 +116,7 @@ EnvelopeModel::Node EnvelopeModel::getNode(int index) const
     n.cpOutValue = node[EnvelopeIDs::cpOutValue];
     n.cpInTime   = node[EnvelopeIDs::cpInTime];
     n.cpInValue  = node[EnvelopeIDs::cpInValue];
+    n.keytrack   = node.getProperty(EnvelopeIDs::keytrack, false); // absent before Phase 6
     return n;
 }
 

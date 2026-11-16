@@ -6,7 +6,7 @@
 //
 // Shape:
 //   ENVELOPE
-//     NODE { time, value, cpOutTime, cpOutValue, cpInTime, cpInValue }
+//     NODE { time, value, cpOutTime, cpOutValue, cpInTime, cpInValue, keytrack? }
 //     NODE { ... }
 //     ...
 //
@@ -33,6 +33,11 @@ namespace EnvelopeIDs
     static const juce::Identifier cpInValue   { "cpInValue" };    // incoming control point, value
 
     static const juce::Identifier length      { "length" };       // work-area length, seconds (Phase 3 §3.4)
+
+    // Phase 6 §3.5: whether this node follows the played note (selective keytracking). Optional -
+    // a node without it is not keytracked, which is exactly what every node saved before Phase 6
+    // meant, so older presets need no migration.
+    static const juce::Identifier keytrack    { "keytrack" };
 }
 
 // EnvelopeModel — owns one node-based envelope as a ValueTree (schema above)
@@ -60,6 +65,7 @@ public:
         double time = 0.0, value = 0.0;
         double cpOutTime = 0.0, cpOutValue = 0.0; // outgoing control point (toward next node)
         double cpInTime  = 0.0, cpInValue  = 0.0; // incoming control point (from previous node)
+        bool   keytrack  = false;                 // follows the played note (Phase 6 §3.5)
     };
 
     // Inserts a new node at (time, value), keeping nodes ordered by time.
@@ -85,6 +91,11 @@ public:
     // of the node's own time/value. One undo step.
     void setControlPoints(int index, double cpOutTime, double cpOutValue,
                                        double cpInTime,  double cpInValue);
+
+    // Flags the node at index as following the played note, or not (§3.5's selective keytracking:
+    // flagged nodes shift with the keyboard, the unflagged foundation stays put). Only meaningful
+    // on a pitch envelope; the amp envelope never reads it. One undo step.
+    void setKeytrack(int index, bool shouldTrack);
 
     int getNumNodes() const { return tree.getNumChildren(); }
     Node getNode(int index) const;

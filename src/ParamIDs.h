@@ -17,6 +17,28 @@ namespace ParamIDs
     // now historical but frozen by the never-rename rule above.
     static const juce::String subGain = "sub.gain";
 
+    // ── Tuning (Phase 6, §3.5) ───────────────────────────────────────────────
+
+    // Master tuning in cents: shifts every Sub layer's pitch, keytracked or not, which is what
+    // moving the A4 = 440 Hz reference means. One semitone either way; anything further is a
+    // transposition, and keytracking already does that.
+    static const juce::String masterTune = "master.tune";
+    static constexpr float masterTuneMaxCents = 100.0f;
+
+    // The MIDI note at which keytracked nodes play exactly as drawn. C3 (60) by default: Ableton's
+    // Drum Rack sends C3 to a pad's instrument unless told otherwise, so a kick there plays as
+    // drawn. Settable per patch (user decision, 2026-11-16).
+    static const juce::String masterKeyRoot = "master.keyRoot";
+    static constexpr int keyRootDefault = 60;
+
+    // Note names as Ableton prints them, where middle C (60) is C3 and MIDI 0 is C-2. Written out
+    // rather than taken from juce::MidiMessage so this header stays juce_core only.
+    inline juce::String noteName(int midiNote)
+    {
+        static const char* const names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        return juce::String(names[((midiNote % 12) + 12) % 12]) + juce::String(midiNote / 12 - 2);
+    }
+
     // Choice indices for layerN.type. These integers ARE the parameter's
     // stored choice indices, so this order is part of the preset contract and
     // must only ever be appended to.

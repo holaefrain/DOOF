@@ -7,8 +7,10 @@ void SubVoice::prepare(double sr)
     sampleRate  = sr;
     state       = State::Idle;
     phase       = 0.0;
-    envTime     = 0.0;
+    envSamples  = 0;
     hasExceededIdleThreshold = false;
+    semitoneShift = 0.0;
+    tuneRatio     = 1.0;
     chokeTimer  = 0.0;
     chokeAmp    = 0.0;
     chokeFreq   = 0.0;
@@ -29,8 +31,8 @@ void SubVoice::noteOn(int midiNote)
     {
         // Capture the voice's current amplitude and frequency so the choke
         // fade starts seamlessly from the same level the oscillator was at.
-        chokeAmp   = ampAt(envTime);
-        chokeFreq  = pitchAt(envTime);
+        chokeAmp   = ampAt(envTime());
+        chokeFreq  = pitchAt(envTime());
         chokeTimer = 0.0;
         pendingNote = midiNote;
         state = State::Choking;
@@ -73,8 +75,9 @@ float SubVoice::processSample()
     }
     else // Playing
     {
-        double amp   = ampAt(envTime);
-        double pitch = pitchAt(envTime);
+        const double t = envTime();
+        double amp   = ampAt(t);
+        double pitch = pitchAt(t);
 
         output = (float)(std::sin(phase) * amp);
 
@@ -82,7 +85,7 @@ float SubVoice::processSample()
         if (phase >= juce::MathConstants<double>::twoPi)
             phase -= juce::MathConstants<double>::twoPi;
 
-        envTime += dt;
+        ++envSamples;
 
         if (amp >= kIdleThreshold)
             hasExceededIdleThreshold = true;
@@ -100,12 +103,24 @@ float SubVoice::processSample()
 
 // ── Private helpers ────────────────────────────────────────────────────────────
 
-// Reads the pitch envelope at time t from currentSnapshot's pitch table.
+// The drawn pitch at t, moved by the keytracked share of the note's offset and by master tuning.
 double SubVoice::pitchAt(double t) const
 {
     if (currentSnapshot == nullptr)
         return 0.0;
-    return lookupTable(currentSnapshot->pitchTable, t);
+
+    double pitch = lookupTable(currentSnapshot->pitchTable, t) * tuneRatio;
+
+    // Skipped entirely when the note is the key root or nothing is flagged, so an untracked patch
+    // costs nothing extra per sample.
+    if (semitoneShift != 0.0 && ! currentSnapshot->keytrackTable.empty())
+    {
+        const double weight = lookupTable(currentSnapshot->keytrackTable, t);
+        if (weight > 0.0)
+            pitch *= std::exp2(weight * semitoneShift / 12.0);
+    }
+
+    return std::min(pitch, sampleRate * kMaxFrequencyRatio);
 }
 
 // Reads the amp envelope at time t from currentSnapshot's amp table.
@@ -136,16 +151,16 @@ double SubVoice::lookupTable(const std::vector<float>& table, double t) const
     return (double) table[(size_t) i0] * (1.0 - frac) + (double) table[(size_t) i0 + 1] * frac;
 }
 
-// Reset the oscillator, envelope timer, and idle-threshold flag, then enter
-// Playing state. Phase is set to 0 so sin(0)=0; combined with an envelope
-// whose amp starts near zero, this gives a smooth (click-free) start even if
-// the caller skips the choke.
-// midiNote is stored for future keytracking (Phase 6); not used for pitch yet.
+// Reset the oscillator, envelope clock, and idle-threshold flag, latch this note's tuning, then
+// enter Playing state. Phase is set to 0 so sin(0)=0; combined with an envelope whose amp starts
+// near zero, this gives a smooth (click-free) start even if the caller skips the choke.
 void SubVoice::startBody(int midiNote)
 {
-    juce::ignoreUnused(midiNote); // keytracking added in Phase 6
-    phase   = 0.0;
-    envTime = 0.0;
+    semitoneShift = (double) (midiNote - pendingKeyRoot);
+    tuneRatio     = std::exp2((double) pendingTuneCents / 1200.0);
+
+    phase      = 0.0;
+    envSamples = 0;
     hasExceededIdleThreshold = false;
     state   = State::Playing;
 }

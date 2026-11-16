@@ -26,4 +26,16 @@ namespace EnvelopeEvaluator
     // node hold at that node's value. An empty model produces an all-zero
     // (silent) table.
     std::vector<float> buildTable(const EnvelopeModel& model);
+
+    // Builds the keytrack weight table for a pitch envelope (Phase 6 §3.5): same size and domain
+    // as buildTable, each entry in [0, 1] saying how much of the played note's offset from the key
+    // root applies at that time. 1 at a keytracked node, 0 at an unflagged one, blended linearly
+    // in time across a segment between the two, held flat before the first node and after the
+    // last. So a run of keytracked nodes shifts as a whole, an unflagged foundation stays exactly
+    // where it was drawn, and the curve between them bends smoothly from one to the other.
+    //
+    // Linear in time rather than following the segment's Bezier shape: the weight decides how far
+    // a point moves, not where it is, and a time blend is what keeps it monotonic between nodes.
+    // An empty model, or one with nothing flagged, gives all zeros - no keytracking at all.
+    std::vector<float> buildKeytrackTable(const EnvelopeModel& model);
 }

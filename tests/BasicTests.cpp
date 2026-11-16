@@ -7,6 +7,7 @@
 #include "DefaultEnvelopes.h"
 #include "LayerAudibility.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -1795,6 +1796,297 @@ private:
 };
 
 static Phase5ClickSamplePlaybackTest phase5ClickSamplePlaybackTest;
+
+// ── Phase 6 ───────────────────────────────────────────────────────────────────
+
+// Shared by the Phase 6 sub tests below: build a voice's snapshot from real models, render it, and
+// measure what frequency it actually played.
+namespace Phase6Fixtures
+{
+    constexpr double kSampleRate = 44100.0;
+
+    // The same three tables EnvelopePublisher bakes, so a test exercises the production evaluator
+    // rather than a hand-made table that could disagree with it.
+    inline EnvelopeSnapshot snapshotOf(const EnvelopeModel& pitch, const EnvelopeModel& amp)
+    {
+        return EnvelopeSnapshot(EnvelopeEvaluator::buildTable(pitch),
+                                EnvelopeEvaluator::buildTable(amp),
+                                EnvelopeEvaluator::buildKeytrackTable(pitch));
+    }
+
+    // A flat, full-level amp envelope, so a frequency measurement is never fighting a decay.
+    inline void flatAmp(EnvelopeModel& amp) { amp.addNode(0.0, 1.0); }
+
+    // One note from a freshly prepared voice, triggered at sample 0.
+    inline std::vector<float> render(const EnvelopeSnapshot& snapshot, int note, int numSamples,
+                                     int keyRoot = 60, float tuneCents = 0.0f)
+    {
+        SubVoice voice;
+        voice.prepare(kSampleRate);
+        voice.setSnapshot(&snapshot);
+        voice.setTuning(keyRoot, tuneCents);
+        voice.noteOn(note);
+
+        std::vector<float> out((std::size_t) numSamples);
+        for (auto& s : out)
+            s = voice.processSample();
+        return out;
+    }
+
+    // Frequency over [fromSec, toSec), from positive-going zero crossings located to a fraction of
+    // a sample by linear interpolation: (crossings - 1) whole cycles between the first and the
+    // last. Precise to well under 0.01% on a steady sine, where counting crossings alone would be
+    // off by up to one cycle in the window.
+    inline double measureFrequency(const std::vector<float>& buf, double fromSec, double toSec,
+                                   double sr = kSampleRate)
+    {
+        const int from = (int) (fromSec * sr), to = (int) (toSec * sr);
+        double first = -1.0, last = -1.0;
+        int crossings = 0;
+
+        for (int i = juce::jmax(1, from); i < to; ++i)
+        {
+            const double a = buf[(std::size_t) i - 1], b = buf[(std::size_t) i];
+            if (a < 0.0 && b >= 0.0)
+            {
+                const double at = (i - 1) + (-a / (b - a));
+                if (first < 0.0)
+                    first = at;
+                last = at;
+                ++crossings;
+            }
+        }
+
+        if (crossings < 2)
+            return 0.0;
+
+        return (crossings - 1) * sr / (last - first);
+    }
+}
+
+// Phase6KeytrackTest — selective keytracking and master tuning (§3.5).
+//   (a) The keytrack flag is a real, undoable node property that travels with its node.
+//   (b) The weight table: 1 on flagged nodes, 0 on unflagged, a time blend between, held at ends.
+//   (c) A keytracked node follows the played note by exactly its distance from the key root.
+//   (d) An unflagged node stays where it was drawn whatever is played.
+//   (e) Mixed: a flagged attack moves while the unflagged foundation stays put.
+//   (f) Master tuning moves everything, flagged or not, and is latched per note.
+class Phase6KeytrackTest : public juce::UnitTest
+{
+public:
+    Phase6KeytrackTest() : juce::UnitTest("Phase6Keytrack") {}
+
+    void runTest() override
+    {
+        testFlagIsAnUndoableNodeProperty();
+        testWeightTable();
+        testFlaggedNodeFollowsTheNote();
+        testUnflaggedNodeStaysPut();
+        testFlaggedAttackMovesFoundationStays();
+        testMasterTuning();
+    }
+
+private:
+    static constexpr double kSr = Phase6Fixtures::kSampleRate;
+
+    // Relative error a measured frequency is allowed. The table holds pitch as float and the
+    // estimator interpolates crossings, so a correct result lands within a few parts per million;
+    // a one-semitone mistake is 6%.
+    static constexpr double kTolerance = 1.0e-4;
+
+    void expectFrequency(double measured, double expected, const juce::String& what)
+    {
+        expect(std::abs(measured - expected) <= expected * kTolerance,
+               what + ": measured " + juce::String(measured, 4) + " Hz, expected "
+                   + juce::String(expected, 4) + " Hz");
+    }
+
+    // (a)
+    void testFlagIsAnUndoableNodeProperty()
+    {
+        beginTest("(a) The keytrack flag is an undoable node property that moves with its node");
+
+        juce::UndoManager undo;
+        EnvelopeModel model(&undo);
+        model.addNode(0.0, 150.0);
+        model.addNode(0.1, 80.0);
+        model.addNode(0.3, 50.0);
+
+        expect(! model.getNode(1).keytrack, "A new node starts keytracked");
+
+        model.setKeytrack(1, true);
+        expect(model.getNode(1).keytrack, "setKeytrack did not flag the node");
+
+        // Moving it past its neighbour re-sorts it; the flag must go with it, not stay at index 1.
+        const int moved = model.moveNode(1, 0.4, 70.0);
+        expectEquals(moved, 2, "The node did not re-sort past its neighbour");
+        expect(model.getNode(2).keytrack, "The flag did not travel with its node through a re-sort");
+        expect(! model.getNode(1).keytrack, "The flag stayed behind at the node's old index");
+
+        // Undo the move, then the flag - each its own step.
+        model.undo();
+        expect(model.getNode(1).keytrack, "Undoing the move lost the flag");
+        model.undo();
+        expect(! model.getNode(1).keytrack, "Undoing setKeytrack did not clear the flag");
+
+        // A node saved before Phase 6 has no property at all, and must read as not keytracked.
+        auto state = model.getValueTree().createCopy();
+        state.getChild(0).removeProperty(EnvelopeIDs::keytrack, nullptr);
+        model.setState(state);
+        expect(! model.getNode(0).keytrack, "A node with no keytrack property reads as keytracked");
+
+        // And the flag survives the state round trip a preset makes.
+        model.setKeytrack(2, true);
+        EnvelopeModel reloaded;
+        reloaded.setState(model.getValueTree().createCopy());
+        expect(reloaded.getNode(2).keytrack, "The flag did not survive a state round trip");
+    }
+
+    // (b)
+    void testWeightTable()
+    {
+        beginTest("(b) Weight table: 1 on flagged, 0 on unflagged, a time blend between");
+
+        const double dt = EnvelopeEvaluator::kTableDomainSeconds / EnvelopeEvaluator::kTableSize;
+        auto at = [dt](const std::vector<float>& table, double t) { return table[(std::size_t) std::lround(t / dt)]; };
+
+        EnvelopeModel none;
+        none.addNode(0.0, 100.0);
+        none.addNode(0.5, 50.0);
+        const auto zeros = EnvelopeEvaluator::buildKeytrackTable(none);
+        expect(std::all_of(zeros.begin(), zeros.end(), [](float w) { return w == 0.0f; }),
+               "Nothing is flagged, yet the weight table is not all zero");
+
+        // Flagged at 0.1 and 0.2, unflagged at 0.6.
+        EnvelopeModel mixed;
+        mixed.addNode(0.1, 120.0);
+        mixed.addNode(0.2, 120.0);
+        mixed.addNode(0.6, 60.0);
+        mixed.setKeytrack(0, true);
+        mixed.setKeytrack(1, true);
+        const auto table = EnvelopeEvaluator::buildKeytrackTable(mixed);
+
+        expectWithinAbsoluteError(at(table, 0.05), 1.0f, 1.0e-6f, "Not held at the first node's flag before it");
+        expectWithinAbsoluteError(at(table, 0.15), 1.0f, 1.0e-6f, "Not fully keytracked between two flagged nodes");
+        expectWithinAbsoluteError(at(table, 0.40), 0.5f, 2.0e-3f, "Not halfway, halfway from flagged to unflagged");
+        expectWithinAbsoluteError(at(table, 1.00), 0.0f, 1.0e-6f, "Not held at the last node's flag after it");
+    }
+
+    // (c) Flat at 100 Hz, the single node flagged, so the whole sound follows the keyboard.
+    void testFlaggedNodeFollowsTheNote()
+    {
+        beginTest("(c) A keytracked node moves by exactly the note's distance from the key root");
+
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0, 100.0);
+        pitch.setKeytrack(0, true);
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+
+        struct Case { int note, root; double expected; };
+        for (const auto c : { Case { 60, 60, 100.0 }, Case { 72, 60, 200.0 }, Case { 48, 60, 50.0 },
+                              Case { 67, 60, 100.0 * std::exp2(7.0 / 12.0) },
+                              Case { 36, 36, 100.0 },   // a different root plays as drawn on itself
+                              Case { 48, 36, 200.0 } })
+        {
+            const auto out = Phase6Fixtures::render(snapshot, c.note, (int) (kSr * 0.5), c.root);
+            expectFrequency(Phase6Fixtures::measureFrequency(out, 0.05, 0.45), c.expected,
+                            "Note " + juce::String(c.note) + " against root " + juce::String(c.root));
+        }
+    }
+
+    // (d)
+    void testUnflaggedNodeStaysPut()
+    {
+        beginTest("(d) An unflagged node plays as drawn whatever note is played");
+
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0, 100.0);
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+
+        for (const int note : { 24, 48, 60, 72, 96 })
+        {
+            const auto out = Phase6Fixtures::render(snapshot, note, (int) (kSr * 0.5));
+            expectFrequency(Phase6Fixtures::measureFrequency(out, 0.05, 0.45), 100.0,
+                            "Unflagged node at note " + juce::String(note));
+        }
+    }
+
+    // (e) The shape §6's verify describes: a flagged plateau on top, an unflagged foundation under
+    // it. Each plateau is two nodes at the same value, so there is a stretch of steady pitch to
+    // measure rather than a single instant.
+    void testFlaggedAttackMovesFoundationStays()
+    {
+        beginTest("(e) The flagged plateau moves with the note; the unflagged foundation does not");
+
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0,  120.0);
+        pitch.addNode(0.15, 120.0);
+        pitch.addNode(0.25, 60.0);
+        pitch.addNode(1.0,  60.0);
+        pitch.setKeytrack(0, true);
+        pitch.setKeytrack(1, true);
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+
+        for (const int offset : { 0, 12, -12, 5 })
+        {
+            const auto out = Phase6Fixtures::render(snapshot, 60 + offset, (int) (kSr * 1.0));
+            const double ratio = std::exp2(offset / 12.0);
+
+            expectFrequency(Phase6Fixtures::measureFrequency(out, 0.01, 0.14), 120.0 * ratio,
+                            "Flagged plateau at offset " + juce::String(offset));
+            expectFrequency(Phase6Fixtures::measureFrequency(out, 0.30, 0.95), 60.0,
+                            "Unflagged foundation at offset " + juce::String(offset));
+        }
+    }
+
+    // (f) Tuning applies to every node, flagged or not - it moves the reference, not the keyboard.
+    // And it is latched at note-on, so turning it mid-note waits for the next hit.
+    void testMasterTuning()
+    {
+        beginTest("(f) Master tuning moves every node by its cents, latched per note");
+
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0,  120.0);
+        pitch.addNode(0.15, 120.0);
+        pitch.addNode(0.25, 60.0);
+        pitch.addNode(1.0,  60.0);
+        pitch.setKeytrack(0, true);
+        pitch.setKeytrack(1, true);
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+
+        for (const float cents : { 100.0f, -50.0f, 13.0f })
+        {
+            const auto out = Phase6Fixtures::render(snapshot, 72, (int) (kSr * 1.0), 60, cents);
+            const double tune = std::exp2(cents / 1200.0);
+
+            expectFrequency(Phase6Fixtures::measureFrequency(out, 0.01, 0.14), 240.0 * tune,
+                            "Flagged plateau at " + juce::String(cents, 0) + " cents");
+            expectFrequency(Phase6Fixtures::measureFrequency(out, 0.30, 0.95), 60.0 * tune,
+                            "Unflagged foundation at " + juce::String(cents, 0) + " cents");
+        }
+
+        // Retuned after the note started: the note keeps the tuning it began with.
+        SubVoice voice;
+        voice.prepare(kSr);
+        voice.setSnapshot(&snapshot);
+        voice.setTuning(60, 0.0f);
+        voice.noteOn(60);
+        voice.setTuning(60, 100.0f);
+
+        std::vector<float> out((std::size_t) (kSr * 1.0));
+        for (auto& s : out)
+            s = voice.processSample();
+
+        expectFrequency(Phase6Fixtures::measureFrequency(out, 0.30, 0.95), 60.0,
+                        "Retuning mid-note reached the note already playing");
+    }
+};
+
+static Phase6KeytrackTest phase6KeytrackTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

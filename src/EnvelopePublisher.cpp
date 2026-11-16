@@ -32,10 +32,12 @@ EnvelopePublisher::~EnvelopePublisher()
 // are message-thread only.
 void EnvelopePublisher::rebuildAndPublish()
 {
-    auto pitchTable = EnvelopeEvaluator::buildTable(pitchModel);
-    auto ampTable   = EnvelopeEvaluator::buildTable(ampModel);
+    auto pitchTable    = EnvelopeEvaluator::buildTable(pitchModel);
+    auto ampTable      = EnvelopeEvaluator::buildTable(ampModel);
+    auto keytrackTable = EnvelopeEvaluator::buildKeytrackTable(pitchModel);
 
-    auto* newSnapshot = new EnvelopeSnapshot(std::move(pitchTable), std::move(ampTable));
+    auto* newSnapshot = new EnvelopeSnapshot(std::move(pitchTable), std::move(ampTable),
+                                             std::move(keytrackTable));
     const auto* oldSnapshot = current.exchange(newSnapshot, std::memory_order_acq_rel);
 
     if (oldSnapshot != nullptr)

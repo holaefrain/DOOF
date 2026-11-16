@@ -170,6 +170,8 @@ private:
 
     std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;
     std::atomic<float>* masterGainParam = nullptr;
+    std::atomic<float>* masterTuneParam = nullptr; // master.tune, cents (Phase 6)
+    std::atomic<float>* keyRootParam    = nullptr; // master.keyRoot, MIDI note (Phase 6)
 
     // Which of a layer's two voices its output is taken from for the current block.
     //

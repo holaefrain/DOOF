@@ -127,6 +127,7 @@ public:
         testAllExpectedParametersExist();
         testDefaultsPreserveThePrePhase4Patch();
         testClickDefaultsAndRanges();
+        testTuningDefaultsAndRanges();
     }
 
 private:
@@ -137,11 +138,12 @@ private:
 
     void testAllExpectedParametersExist()
     {
-        beginTest("(a) All 36 expected parameter IDs exist, and nothing extra");
+        beginTest("(a) All 38 expected parameter IDs exist, and nothing extra");
 
         DOOFAudioProcessor processor;
 
-        juce::StringArray expected { "sub.gain" };
+        // Phase 6's two globals beside the master gain.
+        juce::StringArray expected { "sub.gain", "master.tune", "master.keyRoot" };
         for (int i = 1; i <= kExpectedLayers; ++i)
         {
             const auto n = juce::String(i);
@@ -157,7 +159,8 @@ private:
             expected.add("layer" + n + ".click.decay");
         }
 
-        expectEquals(expected.size(), 36, "1 master gain + 5 layers x (4 mixer + 3 click) controls");
+        expectEquals(expected.size(), 38,
+                     "3 globals + 5 layers x (4 mixer + 3 click) controls");
 
         for (const auto& id : expected)
             expect(processor.apvts.getParameter(id) != nullptr,
@@ -251,6 +254,38 @@ private:
             const float atHalfTravel = decay->range.convertFrom0to1(0.5f);
             expectWithinAbsoluteError(atHalfTravel, ParamIDs::clickDecayDefaultSeconds, 1.0e-4f);
         }
+    }
+
+    // (d) Phase 6's tuning pair. The defaults are what keep the factory patch unchanged: 0 cents,
+    // and a root that only matters once a node is flagged - and C3 because that is what Ableton's
+    // Drum Rack sends a pad's instrument by default.
+    void testTuningDefaultsAndRanges()
+    {
+        beginTest("(d) Tuning: master.tune +/-100 cents at 0, master.keyRoot 0-127 at C3");
+
+        DOOFAudioProcessor processor;
+
+        auto* tune = dynamic_cast<juce::AudioParameterFloat*>(processor.apvts.getParameter("master.tune"));
+        auto* root = dynamic_cast<juce::AudioParameterInt*>(processor.apvts.getParameter("master.keyRoot"));
+
+        expect(tune != nullptr, "master.tune is not a float parameter");
+        expect(root != nullptr, "master.keyRoot is not an int parameter");
+        if (tune == nullptr || root == nullptr)
+            return;
+
+        expectWithinAbsoluteError(tune->range.start, -100.0f, 1.0e-6f);
+        expectWithinAbsoluteError(tune->range.end,    100.0f, 1.0e-6f);
+        expectWithinAbsoluteError(tune->get(),          0.0f, 1.0e-6f);
+
+        expectEquals(root->getRange().getStart(), 0);
+        expectEquals(root->getRange().getEnd(),   127);
+        expectEquals(root->get(), 60, "The key root should default to C3 (MIDI 60)");
+
+        // Named as Ableton names them, so the control reads the same as the piano roll beside it.
+        expectEquals(root->getCurrentValueAsText(), juce::String("C3"));
+        expectEquals(ParamIDs::noteName(36), juce::String("C1"));
+        expectEquals(ParamIDs::noteName(0),  juce::String("C-2"));
+        expectEquals(ParamIDs::noteName(69), juce::String("A3"));
     }
 };
 

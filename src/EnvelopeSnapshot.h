@@ -1,5 +1,6 @@
 #pragma once
 #include "EnvelopeEvaluator.h"
+#include <juce_core/juce_core.h> // jassert
 #include <vector>
 #include <utility>
 
@@ -12,13 +13,21 @@
 // EnvelopePublisher (Step 3b) maintains.
 struct EnvelopeSnapshot
 {
-    EnvelopeSnapshot(std::vector<float> pitch, std::vector<float> amp)
-        : pitchTable(std::move(pitch)), ampTable(std::move(amp))
+    // keytrack may be left empty, meaning no node is keytracked - which is what every snapshot
+    // built before Phase 6 meant, and what tests that only care about pitch and amp still pass.
+    EnvelopeSnapshot(std::vector<float> pitch, std::vector<float> amp,
+                     std::vector<float> keytrack = {})
+        : pitchTable(std::move(pitch)), ampTable(std::move(amp)), keytrackTable(std::move(keytrack))
     {
+        jassert(keytrackTable.empty() || keytrackTable.size() == pitchTable.size());
     }
 
     const std::vector<float> pitchTable;
     const std::vector<float> ampTable;
+
+    // Phase 6 §3.5: how much of the played note's offset from the key root applies at each point
+    // of the pitch table, in [0, 1] (EnvelopeEvaluator::buildKeytrackTable). Empty = all zeros.
+    const std::vector<float> keytrackTable;
 
     // Both tables share this domain/resolution (EnvelopeEvaluator::kTableSize /
     // kTableDomainSeconds at construction time). Stored here so audio-thread

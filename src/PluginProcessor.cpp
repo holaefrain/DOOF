@@ -75,7 +75,9 @@ DOOFAudioProcessor::DOOFAudioProcessor()
     // Resolve every parameter pointer once, so processBlock never looks a
     // parameter up by string. These stay valid for the processor's lifetime.
     masterGainParam = apvts.getRawParameterValue(ParamIDs::subGain);
-    jassert(masterGainParam != nullptr);
+    masterTuneParam = apvts.getRawParameterValue(ParamIDs::masterTune);
+    keyRootParam    = apvts.getRawParameterValue(ParamIDs::masterKeyRoot);
+    jassert(masterGainParam != nullptr && masterTuneParam != nullptr && keyRootParam != nullptr);
 
     for (int i = 0; i < getNumLayers(); ++i)
     {
@@ -180,6 +182,26 @@ DOOFAudioProcessor::createParameterLayout()
         "Sub Gain",
         juce::NormalisableRange<float>(0.0f, 1.0f),
         0.8f // default: 80% level
+    ));
+
+    // Master tuning and key root (Phase 6, §3.5). Both global: they describe the patch as a whole,
+    // and every Sub layer reads the same pair. Defaults change nothing - 0 cents, and a root of C3
+    // only matters once a node is flagged keytracked, which no factory node is.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { ParamIDs::masterTune, 1 },
+        "Master Tune",
+        juce::NormalisableRange<float>(-ParamIDs::masterTuneMaxCents, ParamIDs::masterTuneMaxCents),
+        0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("cents")
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID { ParamIDs::masterKeyRoot, 1 },
+        "Key Root",
+        0, 127,
+        ParamIDs::keyRootDefault,
+        juce::AudioParameterIntAttributes()
+            .withStringFromValueFunction([](int note, int) { return ParamIDs::noteName(note); })
     ));
 
     // Per-layer mixer parameters (§3.2, §3.3): type, level, mute, solo.
@@ -353,6 +375,10 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // so asking per-layer mid-loop could see it change halfway through.
     const bool anySoloed = isAnyLayerSoloed();
 
+    // Read once for the block; each voice latches them at its next note-on.
+    const int   keyRoot   = (int) keyRootParam->load();
+    const float tuneCents = masterTuneParam->load();
+
     for (int i = 0; i < getNumLayers(); ++i)
     {
         auto& layer = getLayer(i);
@@ -360,6 +386,7 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         // Load each snapshot once for the whole block (§2: the audio thread
         // loads the atomic pointer once per block, never per-sample).
         layer.subVoice.setSnapshot(layer.publisher.getSnapshot());
+        layer.subVoice.setTuning(keyRoot, tuneCents);
 
         // Click controls likewise: read once here, latched by ClickVoice at the next note-on.
         layerSource[(size_t) i] = configureLayerSource(i);

@@ -28,9 +28,23 @@ public:
     // per block").
     void setSnapshot(const EnvelopeSnapshot* snapshot) { currentSnapshot = snapshot; }
 
+    // Tuning for the next note (Phase 6 §3.5). keyRootNote is the MIDI note at which keytracked
+    // nodes play exactly as drawn; every semitone the played note sits above or below it moves
+    // them by a semitone. masterTuneCents shifts the whole sub - every node, keytracked or not -
+    // by that many cents, which is what moving the A4 = 440 Hz reference means.
+    //
+    // Latched at the start of each note, never read mid-note, so a hit already sounding cannot be
+    // retuned underneath itself - the same rule ClickVoice applies to its controls. Safe to call
+    // from the audio thread (plain stores); PluginProcessor sets it once per block.
+    void setTuning(int keyRootNote, float masterTuneCents)
+    {
+        pendingKeyRoot = keyRootNote;
+        pendingTuneCents = masterTuneCents;
+    }
+
     // Trigger a new note.  If the voice is already playing, initiates the choke
-    // fade and queues midiNote to start after the fade completes.
-    // midiNote is stored but not used for pitch in Phase 1; keytracking is Phase 6.
+    // fade and queues midiNote to start after the fade completes. The note's
+    // distance from the key root drives the keytracked nodes (see setTuning).
     void noteOn(int midiNote);
 
     // Advance the voice by one sample and return the mono output.
@@ -65,8 +79,25 @@ private:
     // Sine oscillator: phase accumulator in [0, 2π).
     double phase = 0.0;
 
-    // Elapsed time in the current Playing body; drives both pitch and amp envelopes.
-    double envTime = 0.0;
+    // Samples elapsed in the current Playing body; envelope time is derived from it rather than
+    // accumulated, since summing 1/sampleRate drifts (the same fix ClickVoice needed for its decay).
+    juce::int64 envSamples = 0;
+
+    // Envelope time for the sample about to be rendered, in seconds.
+    double envTime() const { return (double) envSamples / sampleRate; }
+
+    // ── Tuning (Phase 6) ──────────────────────────────────────────────────────
+    int   pendingKeyRoot   = 60;   // applied at the next startBody
+    float pendingTuneCents = 0.0f; // likewise
+
+    // Latched by startBody for the note now playing.
+    double semitoneShift = 0.0; // played note minus key root
+    double tuneRatio     = 1.0; // 2^(cents / 1200)
+
+    // Ceiling on the oscillator frequency, as a fraction of the sample rate. A note keytracked far
+    // above the root can push a node past Nyquist, where a sine folds back as an unrelated pitch;
+    // held just under it instead. Far above anything a kick sweep reaches at a sane root.
+    static constexpr double kMaxFrequencyRatio = 0.45;
 
     // Set once amp has risen above kIdleThreshold since the current body
     // started. Guards against an envelope whose amp starts at (or near) zero
@@ -82,12 +113,13 @@ private:
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    // Resets phase, envTime, and the idle-threshold flag, stores the
-    // triggering note, enters Playing state.
+    // Resets phase, the envelope clock and the idle-threshold flag, latches the tuning for
+    // midiNote, enters Playing state.
     void startBody(int midiNote);
 
-    // Evaluates the pitch envelope at time t (seconds) via currentSnapshot's
-    // pitch table. Returns 0.0 if no snapshot has been set yet.
+    // The frequency the oscillator plays at time t (seconds): the drawn pitch envelope, with the
+    // keytracked share of the note's offset from the key root and the master tuning applied.
+    // Returns 0.0 if no snapshot has been set yet.
     double pitchAt(double t) const;
 
     // Evaluates the amp envelope at time t (seconds) via currentSnapshot's
