@@ -4298,6 +4298,280 @@ private:
 
 static Phase6StateTest phase6StateTest;
 
+// Phase6VerifyTest — §6 Phase 6's verify list, through the real processor (and, for snap, the real
+// editor). Each behaviour is pinned at voice level already; this is the end-to-end measurement §6
+// asks for, with the DC blocker, master gain, mixer and MIDI dispatch all in the path.
+//   (a) "Flag two nodes as keytracked, play C1 then C2 - only the flagged nodes shift pitch; the
+//       unflagged foundation stays put (measure their frequencies)."
+//   (b) "Hold a note with sustain mode on - the sound loops between the keytracked nodes, then
+//       completes the tail on release."
+//   (c) "Engage pitch snap and drag - nodes land exactly on harmonic note frequencies."
+//   (d) "Phase-lock at a node, edit an earlier node, measure correlation against a reference bass
+//       tone - downstream phase alignment unchanged."
+class Phase6VerifyTest : public juce::UnitTest
+{
+public:
+    Phase6VerifyTest() : juce::UnitTest("Phase6Verify") {}
+
+    void runTest() override
+    {
+        testKeytrackC1ThenC2();
+        testSustainLoopsThenFinishes();
+        testSnapDragPlaysANote();
+        testPhaseLockHoldsAlignment();
+    }
+
+private:
+    static constexpr double kSr = 44100.0;
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    // Layer 1's envelopes replaced wholesale: a pitch shape per test, and a full-level amp that
+    // holds to 0.6 s and fades out by 1 s.
+    static void shapeLayer1(DOOFAudioProcessor& p, std::initializer_list<std::pair<double, double>> pitchNodes)
+    {
+        auto& layer = p.getLayer(0);
+        layer.pitchModel.setState(juce::ValueTree(EnvelopeIDs::envelopeType));
+        layer.ampModel.setState(juce::ValueTree(EnvelopeIDs::envelopeType));
+        for (const auto& n : pitchNodes)
+            layer.pitchModel.addNode(n.first, n.second);
+
+        layer.ampModel.addNode(0.0, 1.0);
+        layer.ampModel.addNode(0.6, 1.0);
+        layer.ampModel.addNode(1.0, 0.0);
+    }
+
+    struct Event { int sample; bool on; int note; };
+
+    static std::vector<float> render(DOOFAudioProcessor& p, const std::vector<Event>& events, int total)
+    {
+        p.prepareToPlay(kSr, 512);
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, 512);
+        for (int start = 0; start < total; start += 512)
+        {
+            juce::MidiBuffer midi;
+            for (const auto& e : events)
+                if (e.sample >= start && e.sample < start + 512)
+                    midi.addEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, (juce::uint8) 100)
+                                       : juce::MidiMessage::noteOff(1, e.note), e.sample - start);
+            p.processBlock(buffer, midi);
+            out.insert(out.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + 512);
+        }
+        return out;
+    }
+
+    // Interpolated positive zero crossings, as in the lean target's Phase6Fixtures.
+    static double frequency(const std::vector<float>& buf, double fromSec, double toSec)
+    {
+        double first = -1.0, last = -1.0;
+        int crossings = 0;
+        for (int i = juce::jmax(1, (int) (fromSec * kSr)); i < (int) (toSec * kSr); ++i)
+        {
+            const double a = buf[(size_t) i - 1], b = buf[(size_t) i];
+            if (a < 0.0 && b >= 0.0)
+            {
+                const double at = (i - 1) + (-a / (b - a));
+                if (first < 0.0) first = at;
+                last = at;
+                ++crossings;
+            }
+        }
+        return crossings < 2 ? 0.0 : (crossings - 1) * kSr / (last - first);
+    }
+
+    static double rms(const std::vector<float>& buf, double fromSec, double toSec)
+    {
+        double sum = 0.0;
+        const int from = (int) (fromSec * kSr), to = (int) (toSec * kSr);
+        for (int i = from; i < to; ++i)
+            sum += (double) buf[(size_t) i] * buf[(size_t) i];
+        return std::sqrt(sum / (to - from));
+    }
+
+    // Within 0.05%, just under one cent. Looser than the voice-level tests' 0.01% because the output
+    // DC blocker is in the path here: its settling after the note starts shifts the early zero
+    // crossings of a low tone very slightly (0.016% measured on 100 Hz). Any real error these
+    // checks look for - a wrong keytrack shift, a missed tuning - is a semitone (6%) or tens of cents.
+    void expectHz(double measured, double expected, const juce::String& what)
+    {
+        expect(std::abs(measured - expected) <= expected * 5.0e-4,
+               what + ": " + juce::String(measured, 4) + " Hz, expected " + juce::String(expected, 4) + " Hz");
+    }
+
+    // (a) The flagged plateau is drawn at 400 Hz; with the key root at C3, C1 is 24 semitones below
+    // (100 Hz) and C2 12 below (200 Hz). The unflagged foundation is 50 Hz on both.
+    void testKeytrackC1ThenC2()
+    {
+        beginTest("(a) C1 then C2: only the flagged nodes shift; the foundation stays at 50 Hz");
+
+        for (const auto& [note, flaggedHz] : { std::pair<int, double> { 36, 100.0 }, { 48, 200.0 } })
+        {
+            DOOFAudioProcessor p;
+            shapeLayer1(p, { { 0.0, 400.0 }, { 0.2, 400.0 }, { 0.3, 50.0 }, { 1.0, 50.0 } });
+            p.getLayer(0).pitchModel.setKeytrack(0, true);
+            p.getLayer(0).pitchModel.setKeytrack(1, true);
+
+            const auto out = render(p, { { 0, true, note } }, (int) (kSr * 1.0));
+            const auto name = PitchSnap::noteName(note);
+
+            expectHz(frequency(out, 0.02, 0.18), flaggedHz, name + ", flagged plateau");
+            expectHz(frequency(out, 0.35, 0.58), 50.0,      name + ", unflagged foundation");
+        }
+    }
+
+    // (b) The same patch with sustain on, held for 2 s. Unsustained it would be silent by 1 s.
+    void testSustainLoopsThenFinishes()
+    {
+        beginTest("(b) Held with sustain, it loops between the keytracked nodes, then finishes the tail");
+
+        DOOFAudioProcessor p;
+        shapeLayer1(p, { { 0.0, 400.0 }, { 0.2, 400.0 }, { 0.3, 50.0 }, { 1.0, 50.0 } });
+        p.getLayer(0).pitchModel.setKeytrack(0, true);
+        p.getLayer(0).pitchModel.setKeytrack(1, true);
+        setParamValue(p, ParamIDs::layerSubSustain(0), 1.0f);
+
+        // Released 37 samples into a pass, so the playhead is at 37 samples of envelope time.
+        const int release = (int) (kSr * 2.0) + 37;
+        const auto out = render(p, { { 0, true, 60 }, { release, false, 60 } }, (int) (kSr * 3.5));
+        const double r = release / kSr, offset = 37.0 / kSr;
+
+        expect(rms(out, 1.7, 1.95) > 0.3, "Held past where the envelope ends, the note has stopped - it is not looping");
+        expectHz(frequency(out, 1.42, 1.58), 400.0, "While held, the loop");
+
+        // After release: through the rest of the loop and the 0.2 -> 0.3 s sweep into the foundation.
+        expectHz(frequency(out, r + 0.35 - offset, r + 0.58 - offset), 50.0, "After release, the tail");
+        expect(rms(out, r + 1.10 - offset, r + 1.30 - offset) < 1.0e-3, "The tail never finished after release");
+    }
+
+    // (c) A one-node, flat pitch envelope at 100 Hz, dragged with snap on through the canvas, then
+    // played: the measured pitch is a note's - at 0 cents, and at +20 cents of master tuning.
+    void testSnapDragPlaysANote()
+    {
+        beginTest("(c) Snap on, a dragged node plays exactly a note, at the master-tuned reference");
+
+        for (const float cents : { 0.0f, 20.0f })
+        {
+            DOOFAudioProcessor p;
+            shapeLayer1(p, { { 0.0, 100.0 } });
+            setParamValue(p, ParamIDs::masterTune, cents);
+
+            std::unique_ptr<juce::AudioProcessorEditor> editor(p.createEditor());
+            editor->setBounds(0, 0, 800, 700);
+
+            EnvelopeCanvas* canvas = nullptr;
+            juce::Button* snap = nullptr;
+            for (auto* child : editor->getChildren())
+            {
+                if (auto* c = dynamic_cast<EnvelopeCanvas*>(child)) canvas = c;
+                if (auto* b = dynamic_cast<juce::Button*>(child); b != nullptr && b->getButtonText() == "Snap to Note") snap = b;
+            }
+            expect(canvas != nullptr && snap != nullptr, "No canvas or snap toggle");
+            if (canvas == nullptr || snap == nullptr)
+                return;
+
+            snap->setToggleState(true, juce::sendNotificationSync);
+
+            auto event = [canvas](juce::Point<float> pos, bool dragged)
+            {
+                return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), pos, juce::ModifierKeys(),
+                                        1.0f, 0.0f, 0.0f, 0.0f, 0.0f, canvas, canvas, juce::Time::getCurrentTime(),
+                                        pos, juce::Time::getCurrentTime(), 1, dragged);
+            };
+
+            const float h = (float) canvas->getHeight();
+            canvas->mouseDown(event({ 0.0f, h * (1.0f - 80.0f / 200.0f) }, false)); // the node at 100 Hz
+            canvas->mouseDrag(event({ 0.0f, h * 0.52f }, true));
+            canvas->mouseUp(event({ 0.0f, h * 0.52f }, true));
+            editor.reset();
+
+            const double drawn = p.getLayer(0).pitchModel.getNode(0).value;
+            expect(std::abs(drawn - 100.0) > 1.0, "The drag missed the node");
+            expect(std::abs(PitchSnap::centsFromNearest(drawn)) < 1.0e-6, "The dragged node is not on a note: " + juce::String(drawn, 4));
+
+            const auto out = render(p, { { 0, true, 60 } }, (int) (kSr * 0.6));
+            expectHz(frequency(out, 0.05, 0.55), drawn * std::exp2(cents / 1200.0),
+                     PitchSnap::noteName(PitchSnap::nearestNote(drawn)) + " at " + juce::String(cents, 0) + " cents");
+        }
+    }
+
+    // The phase of buf against a reference bass tone - a sine at `hz` starting at sample `zero` -
+    // over [from, from + count), in degrees, plus how well the window fits a pure tone at all.
+    struct Fit { double phaseDegrees, correlation; };
+
+    static Fit fitToReference(const std::vector<float>& buf, double hz, int zero, int from, int count)
+    {
+        double s = 0.0, c = 0.0, xx = 0.0;
+        for (int i = from; i < from + count; ++i)
+        {
+            const double w = juce::MathConstants<double>::twoPi * hz * (i - zero) / kSr;
+            s += buf[(size_t) i] * std::sin(w);
+            c += buf[(size_t) i] * std::cos(w);
+            xx += (double) buf[(size_t) i] * buf[(size_t) i];
+        }
+        // For an exact number of cycles, sin and cos are orthogonal with energy count/2 each, so the
+        // best-fit tone's energy is (s^2 + c^2) * 2 / count.
+        const double fitted = (s * s + c * c) * 2.0 / count;
+        return { std::atan2(c, s) * 180.0 / juce::MathConstants<double>::pi, std::sqrt(fitted / xx) };
+    }
+
+    static double angleBetween(double a, double b)
+    {
+        return std::abs(std::remainder(a - b, 360.0));
+    }
+
+    // (d) Locked at 0.15 s on the 60 Hz foundation, rendered, then the two nodes before the lock are
+    // edited and it is rendered again. Measured from 0.1 s after the lock - long enough for the DC
+    // blocker's memory of the (different) attacks to have died away - over 24 whole cycles.
+    void testPhaseLockHoldsAlignment()
+    {
+        beginTest("(d) Phase-locked, editing an earlier node leaves the tail's phase against a reference tone unchanged");
+
+        const int lockSample = (int) std::lround(0.15 * kSr);
+        const int from = lockSample + (int) (0.1 * kSr);
+        const int count = 735 * 24; // 24 cycles of 60 Hz exactly
+
+        auto phaseOf = [&](bool lock, double attack, double knee)
+        {
+            DOOFAudioProcessor p;
+            shapeLayer1(p, { { 0.0, attack }, { 0.08, knee }, { 0.15, 60.0 }, { 0.8, 60.0 } });
+            if (lock)
+                p.getLayer(0).pitchModel.setPhaseLock(2);
+            setParamValue(p, ParamIDs::layerSubPhase(0), 90.0f);
+
+            const auto out = render(p, { { 0, true, 60 } }, from + count + 512);
+            return fitToReference(out, 60.0, lockSample, from, count);
+        };
+
+        const auto original = phaseOf(true, 150.0, 90.0);
+        const auto edited   = phaseOf(true, 175.0, 97.0);
+
+        expect(original.correlation > 0.999 && edited.correlation > 0.999,
+               "The tail is not a clean 60 Hz tone (correlation " + juce::String(original.correlation, 5)
+                   + " / " + juce::String(edited.correlation, 5) + ")");
+
+        const double moved = angleBetween(original.phaseDegrees, edited.phaseDegrees);
+        expect(moved < 0.2, "Locked, the edit moved the tail's phase by " + juce::String(moved, 3) + " degrees");
+
+        // And the same edit without the lock does move it, so the check above is measuring the lock.
+        const auto unlockedOriginal = phaseOf(false, 150.0, 90.0);
+        const auto unlockedEdited   = phaseOf(false, 175.0, 97.0);
+        const double unlockedMoved = angleBetween(unlockedOriginal.phaseDegrees, unlockedEdited.phaseDegrees);
+        expect(unlockedMoved > 5.0, "Unlocked, the edit moved the tail by only " + juce::String(unlockedMoved, 3)
+                                        + " degrees, so this check cannot tell a lock from no lock");
+
+        logMessage("Phase lock: tail moved " + juce::String(moved, 4) + " deg locked, "
+                   + juce::String(unlockedMoved, 2) + " deg unlocked");
+    }
+};
+
+static Phase6VerifyTest phase6VerifyTest;
+
 
 
 
