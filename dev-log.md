@@ -25,7 +25,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 2 | Node-based envelope engine | Complete | ✅ |
 | 3 | Envelope canvas (GUI) + minimal preset save/load | Complete | ✅ |
 | 4 | Layers + mixer | Complete | ✅ |
-| 5 | Click layers | Built — by-ear check pending | ✅ automated / ⏳ by ear |
+| 5 | Click layers | Complete | ✅ |
 | 6 | Sub tuning + phase tools | Not started | — |
 | 7 | FX suite + routing matrix | Not started | — |
 | 8 | EQ + spectral analyzer | Not started | — |
@@ -70,7 +70,9 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 **DAW pass (carried from Phase 4) — first results, from the user in Live 12:**
 - ✅ DOOF stays in a saved Live project and reloads with it.
 
-**Still outstanding before Phase 6:** the by-ear cohesive-kick check (Phase 5's last verify item) and the rest of the DAW pass — see the 2026-10-06 entry and the checklist given this session.
+**Phase 5 verify — final item:** ✅ the cohesive-kick check passed by ear (user, Live 12): a click stacked on the factory sub sounds like one kick. With the automated checks already green (2026-10-06 entry), **Phase 5 is complete.**
+
+**Still open:** the rest of the DAW pass — patch recall after a full quit, host automation, sample rates and buffer sizes, export/freeze, fast rolls and multiple instances, and the GUI checks no test covers (clicking a strip's own controls, real mouse/keyboard on the click panel, idle CPU). These are host-level checks carried from Phase 4, not a Phase 5 gate.
 
 ---
 
@@ -111,7 +113,7 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 | Click onset sample-aligned to note-on | ✅ every synthesised type stacked on the sub, plus a loaded sample: silent before the note-on, sounding *on* it (stricter than the sub-only dispatch test, whose first sample is sin(0) = 0), bit-identical to the same note at sample 0 — including a note-on on a block boundary |
 | Fast-trigger repeatedly — no clicks at sample boundaries | ✅ a dense retrigger pattern (37-sample bursts, hits on block boundaries, a doubled hit) renders **bit-identically** at 1, 64, 333, 512 and 1024-sample blocks; the outgoing hit ramping rather than cutting is pinned at voice level for both synthesised hits and samples |
 | FFT: transient energy high, sub energy low | ✅ 65536-point FFT split at 300 Hz: the sub has 99.96% of its energy below; the clicks have 97.6% (tick) to 99.8% (snap) above; the sub leads the low band by 45–53 dB |
-| Stack a click on a sub — one cohesive kick | ⏳ **by ear, not yet done** — needs a listen in the Standalone or a DAW |
+| Stack a click on a sub — one cohesive kick | ✅ by ear — confirmed by the user in Live 12 on 2026-11-16 |
 
 Every new test was bite-tested by breaking the code it guards: drop-sample interpolation, no rate conversion, every choice reading slot 0, a summing stereo fold, the panel pinned to layer 1, the poll not refreshing the panel, no ms conversion, a DC blocker reset per block, and a note-on dispatched one sample late. Each failed the test aimed at it.
 
@@ -119,12 +121,12 @@ Every new test was bite-tested by breaking the code it guards: drop-sample inter
 
 **Worth knowing from the FFT:** above 300 Hz the click leads the sub by only 2.4 dB (tick) to 9.8 dB (thump). Traced rather than assumed: 98% of the sub's high-band energy is in its first 10 ms — the factory amp envelope rises 0→1 in 2 ms, which is a small transient of its own — and none comes from the tail. The sub is 32 dB louder overall than a tick, so even 0.04% of it is comparable. Not a defect, but relevant to the by-ear check: the default sub already has some click in it.
 
-**Still outstanding:** the by-ear cohesive-kick check, then Phase 5 can be marked complete. The DAW pass carried over from Phase 4 also still applies.
+**Still outstanding:** the by-ear cohesive-kick check, then Phase 5 can be marked complete. The DAW pass carried over from Phase 4 also still applies. *(By-ear check passed 2026-11-16; Phase 5 complete — see that entry.)*
 
 **Next steps:** Phase 6 — sub tuning and phase tools.
 
 **Open questions this session:**
-- Should the factory sub's 2 ms attack be softened now that a Click layer exists to supply the transient? It is a sound-design call, best made during the by-ear check.
+- Should the factory sub's 2 ms attack be softened now that a Click layer exists to supply the transient? It is a sound-design call, best made during the by-ear check. *(2026-11-16: the stack was judged cohesive with the attack unchanged, so it stays as is unless revisited.)*
 - The Phase 4 GUI tests log `juce_Component.cpp:3022` assertions — the editor calls `grabKeyboardFocus()` in its constructor while not on screen. Harmless headless and not a test failure, but noise in the log; a `isShowing()` guard would silence it.
 
 ---
