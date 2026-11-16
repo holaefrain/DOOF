@@ -26,7 +26,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 3 | Envelope canvas (GUI) + minimal preset save/load | Complete | ✅ |
 | 4 | Layers + mixer | Complete | ✅ |
 | 5 | Click layers | Complete | ✅ |
-| 6 | Sub tuning + phase tools | Not started | — |
+| 6 | Sub tuning + phase tools | Built — verify passed; your hands-on check pending | ✅ automated |
 | 7 | FX suite + routing matrix | Not started | — |
 | 8 | EQ + spectral analyzer | Not started | — |
 | 9 | Master limiter + output | Not started | — |
@@ -43,6 +43,12 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 Decisions made *during build* that supplement or override `project-reference.md §8`.
 (Decisions already locked in §0/§0.5/§8 of the reference doc are not duplicated here.)
 
+- **2026-11-16 — Phase 6 design decisions (user's choices from four options put to them):**
+  - **Harmonics are a series**, not a single overtone: Gain = first harmonic's level vs the fundamental, Ratio = falloff between successive harmonics, Decay = a real fade duration, presets All / Odd / Even / Octaves (up to the 8th).
+  - **Keytrack reference = a settable `master.keyRoot`, default C3 (MIDI 60)**, chosen because Ableton's Drum Rack sends C3 to a pad's instrument by default. Closes §8's "keytrack reference note".
+  - **Pitch snap = nearest equal-tempered note**, measured in cents. Snapping works on drawn values at A4 = 440; master tuning is applied to the Sub's output, so snapped nodes play on the tuned grid without double tuning.
+  - **Phase lock = smooth correction**: a Hann-shaped pitch bend over up to 100 ms before the lock node, solved exactly from the same per-sample arithmetic the voice will run. Rotation sets the phase at the lock node when there is one, else at the note start.
+- **2026-11-16 — Phase 6 decisions made in the build** (not put to the user, recorded so they can be revisited): master tuning moves every Sub node (±100 cents); tuning, key root, harmonics, sustain and phase are latched at note-on like the click controls; the sustain loop runs first-to-last keytracked node with a 10 ms crossfaded wrap, and a release inside the crossfade completes that wrap; the keytrack weight between a flagged and an unflagged node blends linearly in time; Snap to Note is a per-layer view preference like Log Scale; the editor grew to 800 x 700; state version 4.
 - **2026-11-16 — Universal (Intel + Apple Silicon) build deferred until the product is finished** (Phase 14 release prep). Until then DOOF is built for the development Mac only, which is Intel x86_64; add `-DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"` when the time comes.
 - **2026-11-16 — The company behind DOOF is 4Eternity.** `COMPANY_NAME` is `4Eternity` (the vendor hosts list DOOF under) and `BUNDLE_ID` is `com.4eternity.doof`. The manufacturer code stays `ECsy`: JUCE derives the VST3 class ID from the manufacturer and plugin codes, so changing either would orphan DOOF in every saved set, and hosts never display it. If it is ever to change to match the new name, it has to happen before DOOF is used in sets anyone cares about.
 
@@ -56,6 +62,45 @@ Decisions made *during build* that supplement or override `project-reference.md 
 ---
 
 ## Sessions
+
+---
+
+### Session 2026-11-16 (continued) — Phase 6
+
+**Goal:** Phase 6 — sub harmonics, selective keytracking, sustain mode, pitch snap, master tuning, phase rotate + lock/align.
+
+**Built, step by step (one feature commit, tests included, per step):**
+1. **Tuning + keytracking** (`ffdd07d`) — `master.tune`, `master.keyRoot`; an optional `keytrack` flag per pitch node; a keytrack weight table baked into the snapshot alongside the pitch and amp tables; `SubVoice` applies `2^(weight × semitones / 12)` and the tuning ratio per sample. The envelope clock became an integer sample count (same drift fix ClickVoice got).
+2. **Sustain** (`6ed6ea5`) — `layerN.sub.sustain`; the engine handles note-offs for the first time (sample-accurate, Sub voices only, monophonic: an older key's release never cuts a newer note). Loop = first to last keytracked node, crossfaded wrap.
+3. **Harmonics** (`c1d24a3`) — four parameters; Chebyshev recurrence (one sin + one cos per sample for the whole series); fade-out above 0.40–0.45 × sample rate so nothing aliases.
+4. **Phase** (`df251a1`) — `layerN.sub.phase`; an optional `phaseLock` node flag (one per envelope); smooth correction.
+5. **Pitch snap** (`dbc203a`) — `PitchSnap.h` (juce_core only), canvas drag/add snapping, a one-off menu item, a note-aware readout.
+6. **GUI** (`a3e916e`) — `SubPanel`, Tune + Key Root (parses typed note names), Snap to Note toggle, Keytrack / Lock Phase Here in the node menu, canvas markers (keytrack rings, PHASE LOCK line, SUSTAIN LOOP band while sustain is on).
+7. **State** (`faa9367`) — round trip of every Phase 6 setting; version 3 presets load with Phase 6 at defaults.
+8. **Verify** (`a09427b`) — §6's four checks end to end.
+
+**Issues found and fixed along the way:**
+1. **Measurement, not code, three times — each traced before any threshold moved.** (a) Zero crossings on a pitch *sweep* depend on the oscillator's phase, which differs every sustain pass; a 20 ms window gave a 0.2% spread, so the loop-replay check compares 40 ms windows to 1% and separately requires the sweep to be visible. (b) A decaying harmonic measured through a rectangular window leaks into its neighbours' bins at about −50 dB, which made absent harmonics read as present; the Goertzel measurement is now Hann-windowed. (c) The phase lock looked inexact at 1e-4 until traced to the 1 ms pitch table: interpolating just past the lock node carries a little of the approaching segment's slope. A flat approach holds to 1e-5 (the lock itself is exact); a sloped one to 2e-3, documented in the test.
+2. **A test mistake on note numbering** — expected E0 at MIDI 28 when 20.60 Hz is MIDI 16 (E-1 in Ableton's naming). The code was right.
+3. **The Phase 4 canvas test hard-coded a node pixel for a 472 px canvas**, which the Sub panel changed. It now computes the pixel from the live canvas height, as every new canvas test does.
+
+**Verify result (Phase 6 §6):** all four measured through the real processor/editor.
+
+| §6 check | Result |
+|---|---|
+| Flag two nodes, play C1 then C2 — only flagged nodes shift; foundation stays | ✅ flagged plateau (drawn 400 Hz) plays 100 Hz on C1, 200 Hz on C2; unflagged foundation 50 Hz on both |
+| Hold with sustain — loops between keytracked nodes, completes tail on release | ✅ still looping at 400 Hz at 1.5 s; after release the tail reaches 50 Hz and finishes |
+| Pitch snap + drag — nodes land exactly on note frequencies | ✅ dragged node sits within 1e-6 cents of a note and plays it (and the tuned note at +20 cents) |
+| Phase-lock, edit an earlier node, correlate against a reference bass tone | ✅ tail phase moved 0.0017° locked vs 170.9° unlocked; correlation with the reference tone > 0.999 |
+
+Every new test was bite-tested (about 25 deliberate breaks across the eight steps, each failing the test aimed at it). 143 subtests across both binaries (72 + 71), 0 failures; all four targets build with zero compiler warnings.
+
+**Still outstanding:** your hands-on check of Phase 6 in Live (the §5 per-feature loop's "manual test in standalone, then a DAW"), then Phase 6 can be marked complete. The installed VST3 in `/Volumes/External SSD/Ableton/VST3 Plug-In` predates Phase 6 and needs reinstalling for that.
+
+**Next steps:** Phase 7 — FX suite + routing matrix.
+
+**Open questions this session:**
+- The 1 ms pitch table limits how exactly a phase lock holds when the curve approaching the lock node is steep (≤ 0.05° in the tests). Inaudible, but a finer table or exact segment evaluation near the lock node would remove it if it ever matters.
 
 ---
 

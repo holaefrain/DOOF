@@ -338,7 +338,7 @@ Layer 5 ┘
 - Sidechain: pass-through vs detection-only; kick-band-limited detection.
 - Export: user-selectable bit depth/sample rate; default tail-length cap.
 - Drag-onto-layer behaviour before Phase 13 exists (likely load-as-sample).
-- DC-blocker cutoff value; keytrack reference note.
+- DC-blocker cutoff value. *(Keytrack reference note decided 2026-11-16: a settable Key Root parameter, default C3 / MIDI 60 — see dev-log.md.)*
 - Total reported latency / PDC consolidation as oversampling + lookahead are added.
 - Test-host list (which DAWs, which "strict" host) — finalize at first multi-host pass (~Phase 3) and confirm for AU in Phase 14.
 - CPU target + reference machine for performance gates.
