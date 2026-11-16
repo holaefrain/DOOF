@@ -50,7 +50,8 @@ Decisions made *during build* that supplement or override `project-reference.md 
 
 ## Open Questions (unresolved across sessions)
 
-_Nothing yet — log questions here as they arise; mark resolved with the date._
+- **(2026-10-06) Should the factory sub's 2 ms attack be softened now that a Click layer supplies the transient?** The FFT showed the attack is a small transient of its own (98% of the sub's energy above 300 Hz is in its first 10 ms). On 2026-11-16 the stacked kick was judged cohesive with the attack unchanged; the question stays open by the user's choice.
+- **(2026-11-16) The Ableton DAW pass is still open.** Done: DOOF stays in a saved Live 12 project. Not yet done: patch recall after a full quit, host automation, sample rates and buffer sizes, export/freeze, fast rolls and multiple instances, and the GUI checks no test covers (clicking a strip's own controls, real mouse/keyboard on the click panel, idle CPU). Not a gate on any phase; run alongside Phase 6.
 
 ---
 
@@ -126,7 +127,7 @@ Every new test was bite-tested by breaking the code it guards: drop-sample inter
 **Next steps:** Phase 6 — sub tuning and phase tools.
 
 **Open questions this session:**
-- Should the factory sub's 2 ms attack be softened now that a Click layer exists to supply the transient? It is a sound-design call, best made during the by-ear check. *(2026-11-16: the stack was judged cohesive with the attack unchanged, so it stays as is unless revisited.)*
+- Should the factory sub's 2 ms attack be softened now that a Click layer exists to supply the transient? It is a sound-design call, best made during the by-ear check. *(2026-11-16: still open, by the user's choice. The stack was judged cohesive with the attack unchanged — tracked under Open Questions.)*
 - The Phase 4 GUI tests log `juce_Component.cpp:3022` assertions — the editor calls `grabKeyboardFocus()` in its constructor while not on screen. Harmless headless and not a test failure, but noise in the log; a `isShowing()` guard would silence it.
 
 ---
