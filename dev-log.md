@@ -43,6 +43,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 Decisions made *during build* that supplement or override `project-reference.md §8`.
 (Decisions already locked in §0/§0.5/§8 of the reference doc are not duplicated here.)
 
+- **2026-11-16 — Universal (Intel + Apple Silicon) build deferred until the product is finished** (Phase 14 release prep). Until then DOOF is built for the development Mac only, which is Intel x86_64; add `-DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"` when the time comes.
 - **2026-11-16 — The company behind DOOF is 4Eternity.** `COMPANY_NAME` is `4Eternity` (the vendor hosts list DOOF under) and `BUNDLE_ID` is `com.4eternity.doof`. The manufacturer code stays `ECsy`: JUCE derives the VST3 class ID from the manufacturer and plugin codes, so changing either would orphan DOOF in every saved set, and hosts never display it. If it is ever to change to match the new name, it has to happen before DOOF is used in sets anyone cares about.
 
 ---
@@ -54,6 +55,22 @@ _Nothing yet — log questions here as they arise; mark resolved with the date._
 ---
 
 ## Sessions
+
+---
+
+### Session 2026-11-16
+
+**Goal:** Get DOOF into Ableton Live for real use, under the 4Eternity name.
+
+**What happened:**
+1. **Company name** — `COMPANY_NAME` is now `4Eternity`, `BUNDLE_ID` `com.4eternity.doof`. Manufacturer/plugin codes (`ECsy`/`Doof`) unchanged on purpose — see the Cumulative Decision Log.
+2. **Release VST3 installed** to `/Volumes/External SSD/Ableton/VST3 Plug-In/DOOF.vst3` (Live's custom VST3 folder on the external drive), built from `cmake-build-release/` (gitignored). Live 12 Suite 12.4.16, Intel.
+3. **Bug: every VST3 this repo built had a broken code signature.** With a Makefile generator JUCE ad-hoc signs the bundle, then writes `moduleinfo.json` into it, so `codesign --verify` failed with "a sealed resource is missing or invalid". JUCE only re-signs inside its copy step, which `COPY_PLUGIN_AFTER_BUILD FALSE` turns off. Fixed with a POST_BUILD step re-running JUCE's `checkBundleSigning.cmake` after the manifest; Debug and Release both verify. Found only because the installed bundle was checked — nothing in the test suite looks at the packaged plugin.
+
+**DAW pass (carried from Phase 4) — first results, from the user in Live 12:**
+- ✅ DOOF stays in a saved Live project and reloads with it.
+
+**Still outstanding before Phase 6:** the by-ear cohesive-kick check (Phase 5's last verify item) and the rest of the DAW pass — see the 2026-10-06 entry and the checklist given this session.
 
 ---
 
