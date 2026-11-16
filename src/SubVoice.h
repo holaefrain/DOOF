@@ -81,6 +81,12 @@ public:
         pendingHarmSet = set;
     }
 
+    // Phase rotation for the next note (§3.6), in degrees: the phase the sine has at its reference
+    // point. With no phase-locked node the reference is the note's start; with one, it is the lock
+    // node, and the note starts from zero phase instead (see the lock state below). Latched at
+    // note-on, like setTuning.
+    void setPhaseRotation(float degrees) { pendingRotateDegrees = degrees; }
+
     // Trigger a new note.  If the voice is already playing, initiates the choke
     // fade and queues midiNote to start after the fade completes. The note's
     // distance from the key root drives the keytracked nodes (see setTuning).
@@ -189,6 +195,43 @@ private:
     // The oscillator's output at `phase` before the amp envelope: the sine, plus the harmonic
     // series for as long as it lasts. `frequency` is the fundamental, for the aliasing guard.
     double waveform(double phase, double frequency) const;
+
+    // ── Phase rotate + lock (Phase 6) ─────────────────────────────────────────
+    float  pendingRotateDegrees = 0.0f;
+    double rotateRadians        = 0.0; // latched for the note now playing
+
+    // Phase lock (§3.6: "lock phase from a chosen node onward; edits before it don't disturb
+    // downstream phase alignment"). The phase is made to arrive at the lock node at exactly
+    // rotateRadians, so everything after the node depends only on the envelope after it.
+    //
+    // Smooth correction, by user decision: over a window ending at the lock node, every phase
+    // step is scaled by 1 + c * hann(position in window). At the window's start the voice adds up
+    // exactly the steps it is about to take - the same per-sample arithmetic, not an estimate -
+    // works out how far short of or past the target they would land, and picks c to close the
+    // gap. The Hann shape means the pitch eases away and back rather than stepping, and the gap
+    // is never more than half a cycle, since the target only has to match modulo a full turn.
+    bool        lockPending     = false; // this note has a lock still to reach
+    bool        lockCorrecting  = false; // inside the correction window now
+    juce::int64 lockSample      = 0;     // envelope position where the phase must equal the target
+    juce::int64 lockWindowStart = 0;     // where the correction window begins
+    double      lockCorrection  = 0.0;   // c above
+
+    // Longest correction window. Longer spreads the correction thinner (a smaller pitch bend);
+    // 100 ms holds at least five cycles of anything a kick sweeps through, so a half-cycle
+    // correction is at most a ~10% bend at its peak and far less on average. A lock node earlier
+    // than this uses everything before it.
+    static constexpr double kLockWindowSec = 0.1;
+
+    // Bounds on c. In a window too short or too low to hold a cycle, closing the gap exactly could
+    // take the pitch to zero or negative; it is clamped instead, and the lock lands short.
+    static constexpr double kMinLockCorrection = -0.75;
+    static constexpr double kMaxLockCorrection = 3.0;
+
+    // Works out lockCorrection at the start of the window and enters it.
+    void beginLockCorrection();
+
+    // The correction's shape at an envelope position inside the window, in [0, 1].
+    double lockWindowShape(juce::int64 position) const;
 
     // Ceiling on the oscillator frequency, as a fraction of the sample rate. A note keytracked far
     // above the root can push a node past Nyquist, where a sine folds back as an unrelated pitch;

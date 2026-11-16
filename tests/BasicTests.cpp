@@ -1812,7 +1812,8 @@ namespace Phase6Fixtures
         return EnvelopeSnapshot(EnvelopeEvaluator::buildTable(pitch),
                                 EnvelopeEvaluator::buildTable(amp),
                                 EnvelopeEvaluator::buildKeytrackTable(pitch),
-                                EnvelopeEvaluator::sustainLoopSpan(pitch));
+                                EnvelopeEvaluator::sustainLoopSpan(pitch),
+                                EnvelopeEvaluator::phaseLockTime(pitch));
     }
 
     // A flat, full-level amp envelope, so a frequency measurement is never fighting a decay.
@@ -2672,6 +2673,280 @@ private:
 };
 
 static Phase6HarmonicsTest phase6HarmonicsTest;
+
+// Phase6PhaseTest — phase rotate and phase lock (§3.6).
+//   (a) The lock is a single, undoable node property that travels with its node.
+//   (b) Without a lock, rotation sets the sine's phase at the note start.
+//   (c) With a lock, editing nodes before it leaves everything after it unchanged, landing on the
+//       rotation at the node - including a lock earlier than the correction window.
+//   (d) The correction is smooth: no sample jumps beyond what the sweep itself makes.
+//   (e) The lock holds across keytracked notes, whose attacks differ.
+//   (f) Without a lock, the same edit does move the tail - so (c) is measuring the lock.
+class Phase6PhaseTest : public juce::UnitTest
+{
+public:
+    Phase6PhaseTest() : juce::UnitTest("Phase6Phase") {}
+
+    void runTest() override
+    {
+        testLockIsASingleUndoableProperty();
+        testRotationWithoutALock();
+        testLockHoldsThroughEarlierEdits();
+        testCorrectionIsSmooth();
+        testLockHoldsAcrossKeytrackedNotes();
+        testWithoutALockTheTailMoves();
+    }
+
+private:
+    static constexpr double kSr = Phase6Fixtures::kSampleRate;
+    static constexpr double kFoundationHz = 60.0;
+
+    // An attack sweeping into a flat 60 Hz foundation from 0.15 s. `attack` and `knee` are the
+    // two nodes an edit before the lock changes. The lock, when asked for, sits on the 0.15 s node.
+    static void buildPitch(EnvelopeModel& pitch, double attack, double knee, double lockAt, bool lock)
+    {
+        pitch.addNode(0.0, attack);
+        pitch.addNode(lockAt * 0.66, knee);
+        const int lockNode = pitch.addNode(lockAt, kFoundationHz);
+        pitch.addNode(0.6, kFoundationHz);
+        if (lock)
+            pitch.setPhaseLock(lockNode);
+    }
+
+    static std::vector<float> render(const EnvelopeSnapshot& snapshot, float rotateDegrees,
+                                     int numSamples, int note = 60)
+    {
+        SubVoice voice;
+        voice.prepare(kSr);
+        voice.setSnapshot(&snapshot);
+        voice.setTuning(60, 0.0f);
+        voice.setPhaseRotation(rotateDegrees);
+        voice.noteOn(note);
+
+        std::vector<float> out((std::size_t) numSamples);
+        for (auto& s : out)
+            s = voice.processSample();
+        return out;
+    }
+
+    static std::vector<float> renderPatch(double attack, double knee, double lockAt, bool lock,
+                                          float rotateDegrees, int note = 60, bool keytrackAttack = false)
+    {
+        EnvelopeModel pitch, amp;
+        buildPitch(pitch, attack, knee, lockAt, lock);
+        if (keytrackAttack)
+        {
+            pitch.setKeytrack(0, true);
+            pitch.setKeytrack(1, true);
+        }
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+        return render(snapshot, rotateDegrees, (int) (kSr * 0.5), note);
+    }
+
+    // The tone the tail should be, from the lock node on: the foundation at the rotation's phase.
+    static double reference(int samplesAfterLock, float rotateDegrees)
+    {
+        return std::sin(rotateDegrees * juce::MathConstants<double>::pi / 180.0
+                        + juce::MathConstants<double>::twoPi * kFoundationHz * samplesAfterLock / kSr);
+    }
+
+    // Pearson correlation of buf[from, from + count) with the reference tone - §6's "measure
+    // correlation against a reference bass tone".
+    static double correlationWithReference(const std::vector<float>& buf, int from, int count, float rotateDegrees)
+    {
+        double sxy = 0.0, sxx = 0.0, syy = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            const double x = buf[(std::size_t) (from + i)];
+            const double y = reference(i, rotateDegrees);
+            sxy += x * y; sxx += x * x; syy += y * y;
+        }
+        return sxy / std::sqrt(sxx * syy);
+    }
+
+    static double worstDifferenceFrom(const std::vector<float>& buf, int from, float rotateDegrees)
+    {
+        double worst = 0.0;
+        for (int i = from; i < (int) buf.size(); ++i)
+            worst = std::max(worst, std::abs(buf[(std::size_t) i] - reference(i - from, rotateDegrees)));
+        return worst;
+    }
+
+    // (a)
+    void testLockIsASingleUndoableProperty()
+    {
+        beginTest("(a) The phase lock is a single, undoable node property that moves with its node");
+
+        juce::UndoManager undo;
+        EnvelopeModel model(&undo);
+        model.addNode(0.0, 150.0);
+        model.addNode(0.1, 80.0);
+        model.addNode(0.2, 60.0);
+
+        expectEquals(EnvelopeEvaluator::phaseLockTime(model), -1.0, "A lock exists before any was set");
+
+        model.setPhaseLock(1);
+        expect(model.getNode(1).phaseLock, "setPhaseLock did not lock the node");
+        expectEquals(EnvelopeEvaluator::phaseLockTime(model), 0.1);
+
+        model.setPhaseLock(2);
+        expect(! model.getNode(1).phaseLock && model.getNode(2).phaseLock,
+               "Locking a second node did not move the lock - there must only ever be one");
+
+        model.undo();
+        expect(model.getNode(1).phaseLock && ! model.getNode(2).phaseLock,
+               "One undo did not move the lock back in a single step");
+
+        // Through a re-sort, the lock goes with its node.
+        model.moveNode(1, 0.3, 50.0);
+        expect(model.getNode(2).phaseLock, "The lock did not travel with its node");
+        expectWithinAbsoluteError(EnvelopeEvaluator::phaseLockTime(model), 0.3, 1.0e-12);
+
+        model.clearPhaseLock();
+        expectEquals(EnvelopeEvaluator::phaseLockTime(model), -1.0, "clearPhaseLock left a lock behind");
+    }
+
+    // (b) Flat 100 Hz, flat full amp: the output is sin(rotation + 2 pi 100 n / sr) from sample 0.
+    void testRotationWithoutALock()
+    {
+        beginTest("(b) Without a lock, rotation sets the sine's phase at the note start");
+
+        EnvelopeModel pitch, amp;
+        pitch.addNode(0.0, 100.0);
+        Phase6Fixtures::flatAmp(amp);
+        const auto snapshot = Phase6Fixtures::snapshotOf(pitch, amp);
+
+        for (const float degrees : { 0.0f, 90.0f, 180.0f, 270.0f, 33.0f })
+        {
+            const auto out = render(snapshot, degrees, 4410);
+
+            double worst = 0.0;
+            for (int i = 0; i < (int) out.size(); ++i)
+            {
+                const double expected = std::sin(degrees * juce::MathConstants<double>::pi / 180.0
+                                                 + juce::MathConstants<double>::twoPi * 100.0 * i / kSr);
+                worst = std::max(worst, std::abs(out[(std::size_t) i] - expected));
+            }
+
+            expect(worst < 1.0e-5, juce::String(degrees, 0) + " degrees: the output strays "
+                                       + juce::String(worst, 8) + " from the rotated sine");
+        }
+    }
+
+    // (c) The heart of §6's check. Two patches differing only before the lock; from the lock node
+    // on, both must be the foundation at the rotation's phase.
+    //
+    // Two approaches into the lock node, with two tolerances. With a flat approach (the node before
+    // the lock already at the foundation) the lock is exact. With a sloped one, the pitch table's
+    // 1 ms resolution adds a residual that has nothing to do with the lock: the voice interpolates
+    // between table entries, so for the first fraction of a millisecond after the node the pitch
+    // still carries a little of the slope before it, leaving a constant phase offset of at most
+    // ~0.05 degrees here - steeper approaches, more offset. Measured, then bounded.
+    void testLockHoldsThroughEarlierEdits()
+    {
+        beginTest("(c) With a lock, edits before it leave everything after it unchanged");
+
+        struct Approach { const char* name; double originalKnee, editedKnee, tolerance; };
+
+        // 0.15 s gives the full 100 ms correction window; 0.05 s is earlier than the window, so the
+        // whole stretch before the lock is used.
+        for (const double lockAt : { 0.15, 0.05 })
+        for (const auto approach : { Approach { "flat",   kFoundationHz, kFoundationHz, 1.0e-5 },
+                                     Approach { "sloped", 80.0,          97.0,          2.0e-3 } })
+        {
+            for (const float degrees : { 0.0f, 90.0f, 250.0f })
+            {
+                const int lockSample = (int) std::lround(lockAt * kSr);
+                const juce::String label = "Lock at " + juce::String(lockAt, 2) + " s, " + approach.name
+                                         + " approach, " + juce::String(degrees, 0) + " deg: ";
+
+                const auto original = renderPatch(150.0, approach.originalKnee, lockAt, true, degrees);
+                const auto edited   = renderPatch(175.0, approach.editedKnee,   lockAt, true, degrees);
+
+                for (const auto* version : { &original, &edited })
+                {
+                    const double stray = worstDifferenceFrom(*version, lockSample, degrees);
+                    expect(stray < approach.tolerance, label + "the tail strays " + juce::String(stray, 8)
+                                                           + " from the foundation at the locked phase");
+
+                    const double correlation = correlationWithReference(*version, lockSample, (int) (kSr * 0.3), degrees);
+                    expect(correlation > 0.99999, label + "correlation with the reference tone is only "
+                                                      + juce::String(correlation, 6));
+                }
+            }
+        }
+    }
+
+    // (d) The fastest the output can legitimately move between samples is a full-level sine at the
+    // sweep's top pitch, 175 Hz. A hard reset of the phase at the lock node would jump far past it.
+    void testCorrectionIsSmooth()
+    {
+        beginTest("(d) The correction bends the pitch rather than jumping the phase");
+
+        const double ceiling = juce::MathConstants<double>::twoPi * 175.0 / kSr * 1.05;
+
+        for (const float degrees : { 0.0f, 90.0f, 180.0f, 250.0f })
+        {
+            const auto out = renderPatch(175.0, 97.0, 0.15, true, degrees);
+
+            double worst = 0.0;
+            int worstAt = -1;
+            for (int i = 1; i < (int) out.size(); ++i)
+            {
+                const double jump = std::abs((double) out[(std::size_t) i] - out[(std::size_t) i - 1]);
+                if (jump > worst) { worst = jump; worstAt = i; }
+            }
+
+            expect(worst < ceiling, juce::String(degrees, 0) + " deg: a jump of " + juce::String(worst, 4)
+                                        + " at sample " + juce::String(worstAt) + " - more than the sweep itself makes ("
+                                        + juce::String(ceiling, 4) + ")");
+        }
+    }
+
+    // (e) Keytracked attack nodes make each note's attack different - a different phase arriving at
+    // the lock - but the unflagged foundation after it must still land on the rotation.
+    void testLockHoldsAcrossKeytrackedNotes()
+    {
+        beginTest("(e) The lock holds across notes whose keytracked attacks differ");
+
+        // The keytracked knee slopes into the unflagged lock node by a different amount on every
+        // note, so this carries (c)'s sloped-approach tolerance.
+        const int lockSample = (int) std::lround(0.15 * kSr);
+        for (const int note : { 60, 55, 67, 72 })
+        {
+            const auto out = renderPatch(150.0, 80.0, 0.15, true, 90.0f, note, true);
+            const double stray = worstDifferenceFrom(out, lockSample, 90.0f);
+            expect(stray < 2.0e-3, "Note " + juce::String(note) + ": the tail strays " + juce::String(stray, 8)
+                                       + " from the locked phase");
+        }
+    }
+
+    // (f) Without this, (c) would pass for a patch whose tail happened not to depend on the
+    // attack at all.
+    void testWithoutALockTheTailMoves()
+    {
+        beginTest("(f) Without a lock, the same edit moves the tail's phase");
+
+        const int lockSample = (int) std::lround(0.15 * kSr);
+        const auto original = renderPatch(150.0, 80.0, 0.15, false, 0.0f);
+        const auto edited   = renderPatch(175.0, 97.0, 0.15, false, 0.0f);
+
+        double sxy = 0.0, sxx = 0.0, syy = 0.0;
+        for (int i = lockSample; i < (int) original.size(); ++i)
+        {
+            sxy += (double) original[(std::size_t) i] * edited[(std::size_t) i];
+            sxx += (double) original[(std::size_t) i] * original[(std::size_t) i];
+            syy += (double) edited[(std::size_t) i] * edited[(std::size_t) i];
+        }
+        const double correlation = sxy / std::sqrt(sxx * syy);
+
+        expect(correlation < 0.9, "Unlocked, the two tails still correlate at " + juce::String(correlation, 4)
+                                      + ", so the edit does not move the tail and (c) proves nothing");
+    }
+};
+
+static Phase6PhaseTest phase6PhaseTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

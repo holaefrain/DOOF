@@ -140,7 +140,7 @@ private:
 
     void testAllExpectedParametersExist()
     {
-        beginTest("(a) All 63 expected parameter IDs exist, and nothing extra");
+        beginTest("(a) All 68 expected parameter IDs exist, and nothing extra");
 
         DOOFAudioProcessor processor;
 
@@ -166,10 +166,11 @@ private:
             expected.add("layer" + n + ".sub.harmRatio");
             expected.add("layer" + n + ".sub.harmDecay");
             expected.add("layer" + n + ".sub.harmPreset");
+            expected.add("layer" + n + ".sub.phase");
         }
 
-        expectEquals(expected.size(), 63,
-                     "3 globals + 5 layers x (4 mixer + 3 click + 5 sub) controls");
+        expectEquals(expected.size(), 68,
+                     "3 globals + 5 layers x (4 mixer + 3 click + 6 sub) controls");
 
         for (const auto& id : expected)
             expect(processor.apvts.getParameter(id) != nullptr,
@@ -301,7 +302,7 @@ private:
     // preset list is fixed at four entries for the same reason the click list is fixed at eight.
     void testHarmonicsDefaultsAndRanges()
     {
-        beginTest("(e) Harmonics: gain 0-1 at 0, ratio 0-1 at 0.5, skewed decay, 4-entry preset list");
+        beginTest("(e) Sub controls: harmonics ranges and presets, sustain off, phase 0-360 at 0");
 
         DOOFAudioProcessor processor;
 
@@ -332,6 +333,15 @@ private:
             expectEquals(preset->getIndex(), 0);
 
             expect(! sustain->get(), "Sustain must default off");
+
+            auto* phase = dynamic_cast<juce::AudioParameterFloat*>(processor.apvts.getParameter("layer" + n + ".sub.phase"));
+            expect(phase != nullptr, "layer" + n + ".sub.phase is not a float parameter");
+            if (phase == nullptr)
+                return;
+
+            expectWithinAbsoluteError(phase->range.start, 0.0f,   1.0e-6f);
+            expectWithinAbsoluteError(phase->range.end,   360.0f, 1.0e-6f);
+            expectWithinAbsoluteError(phase->get(),       0.0f,   1.0e-6f, "Phase must default to 0 degrees");
         }
     }
 };
@@ -3544,7 +3554,7 @@ public:
 
     void runTest() override
     {
-        beginTest("Each harmonics parameter changes the render of the layer it belongs to");
+        beginTest("Each harmonics parameter, and phase rotation, changes the render of the layer it belongs to");
 
         auto render = [](std::function<void(DOOFAudioProcessor&)> configure)
         {
@@ -3588,6 +3598,10 @@ public:
         expect(differs(withGain, render([&](DOOFAudioProcessor& p) {
                    set(p, ParamIDs::layerSubHarmGain(0), 0.5f); set(p, ParamIDs::layerSubHarmPreset(0), 1.0f); })),
                "The preset did not reach the voice");
+
+        // Phase rotation acts on its own, gain or not.
+        expect(differs(factory, render([&](DOOFAudioProcessor& p) { set(p, ParamIDs::layerSubPhase(0), 90.0f); })),
+               "Phase rotation did not reach the voice");
 
         // Layer 2's gain must not reach layer 1.
         expect(! differs(factory, render([&](DOOFAudioProcessor& p) { set(p, ParamIDs::layerSubHarmGain(1), 0.5f); })),

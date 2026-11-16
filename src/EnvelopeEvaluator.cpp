@@ -127,4 +127,16 @@ LoopSpan sustainLoopSpan(const EnvelopeModel& pitchModel)
     return span;
 }
 
+double phaseLockTime(const EnvelopeModel& pitchModel)
+{
+    for (int i = 0; i < pitchModel.getNumNodes(); ++i)
+    {
+        const auto node = pitchModel.getNode(i);
+        if (node.phaseLock)
+            return node.time;
+    }
+
+    return -1.0;
+}
+
 } // namespace EnvelopeEvaluator

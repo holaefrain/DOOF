@@ -123,6 +123,10 @@ namespace ParamIDs
 
     static_assert(SubVoice::kNumHarmonicSets == 4, "harmPresetChoices() has drifted from SubVoice::HarmonicSet");
 
+    // Phase rotation (§3.6), degrees: the sine's phase at the note start, or at the phase-locked
+    // node when there is one.
+    inline juce::String layerSubPhase (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.phase"; }
+
     // Decay range, seconds. Skewed around the default, like the click decay: the useful range is
     // short, a long one is occasionally wanted for a buzzy tail.
     static constexpr float subHarmDecayMinSeconds     = 0.005f;

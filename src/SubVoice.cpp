@@ -18,6 +18,9 @@ void SubVoice::prepare(double sr)
     held          = false;
     pendingHeld   = false;
     wrapCommitted = false;
+    rotateRadians  = 0.0;
+    lockPending    = false;
+    lockCorrecting = false;
     chokeTimer  = 0.0;
     chokeAmp    = 0.0;
     chokeFreq   = 0.0;
@@ -148,17 +151,28 @@ float SubVoice::processSample()
             && envSamples >= loop.end - loop.crossfade && envSamples < loop.end)
             wrapCommitted = true;
 
+        if (lockPending && envSamples == lockWindowStart)
+            beginLockCorrection();
+
         double amp, pitch;
         currentEnvelope(amp, pitch);
 
         output = (float)(waveform(phase, pitch) * amp);
 
-        phase += juce::MathConstants<double>::twoPi * pitch / sampleRate;
-        if (phase >= juce::MathConstants<double>::twoPi)
+        double step = juce::MathConstants<double>::twoPi * pitch / sampleRate;
+        if (lockCorrecting)
+            step *= 1.0 + lockCorrection * lockWindowShape(envSamples);
+
+        // A loop rather than one subtraction: a corrected step can exceed a full turn.
+        phase += step;
+        while (phase >= juce::MathConstants<double>::twoPi)
             phase -= juce::MathConstants<double>::twoPi;
 
         ++envSamples;
         ++noteSamples;
+
+        if (lockCorrecting && envSamples >= lockSample)
+            lockCorrecting = false; // arrived: from here on the phase runs free from the target
 
         // The phase accumulator carries straight on across the jump, so the waveform stays
         // continuous; only the envelope position moves.
@@ -166,6 +180,14 @@ float SubVoice::processSample()
         {
             envSamples -= loop.end - loop.start;
             wrapCommitted = false;
+
+            // A wrap inside the correction window invalidates the steps it was computed from.
+            // Re-arm, so the correction is worked out afresh when the envelope next reaches it.
+            if (lockCorrecting)
+            {
+                lockCorrecting = false;
+                lockPending = true;
+            }
         }
 
         if (amp >= kIdleThreshold)
@@ -185,6 +207,37 @@ float SubVoice::processSample()
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
+
+// Adds up the phase steps the window is about to take, with the same pitchAt and the same
+// arithmetic the render loop will use, and solves for the correction that lands the phase on the
+// target at the lock node.
+void SubVoice::beginLockCorrection()
+{
+    lockPending = false;
+
+    double natural = 0.0;  // total phase the window advances uncorrected
+    double weighted = 0.0; // the same, weighted by the correction's shape
+    for (juce::int64 n = lockWindowStart; n < lockSample; ++n)
+    {
+        const double step = juce::MathConstants<double>::twoPi * pitchAt((double) n / sampleRate) / sampleRate;
+        natural  += step;
+        weighted += step * lockWindowShape(n);
+    }
+
+    // The gap to close, taken the short way round: never more than half a turn either side.
+    const double gap = std::remainder(rotateRadians - (phase + natural), juce::MathConstants<double>::twoPi);
+
+    lockCorrection = weighted > 0.0 ? juce::jlimit(kMinLockCorrection, kMaxLockCorrection, gap / weighted)
+                                    : 0.0;
+    lockCorrecting = true;
+}
+
+double SubVoice::lockWindowShape(juce::int64 position) const
+{
+    const double length = (double) (lockSample - lockWindowStart);
+    const double along = (double) (position - lockWindowStart) / length;
+    return 0.5 * (1.0 - std::cos(juce::MathConstants<double>::twoPi * along));
+}
 
 // sin(phase), plus the harmonic series while it lasts. sin(h * phase) comes from the Chebyshev
 // recurrence sin((h+1)x) = 2cos(x)sin(hx) - sin((h-1)x), so the whole series costs one sin and one
@@ -320,7 +373,28 @@ void SubVoice::startBody(int midiNote, bool keyHeld)
 
     noteSamples = 0;
 
-    phase      = 0.0;
+    // Phase: rotated at the start, unless a lock moves the rotation to the lock node.
+    rotateRadians = std::remainder((double) pendingRotateDegrees * juce::MathConstants<double>::pi / 180.0,
+                                   juce::MathConstants<double>::twoPi);
+    if (rotateRadians < 0.0)
+        rotateRadians += juce::MathConstants<double>::twoPi;
+
+    lockCorrecting = false;
+    lockPending    = false;
+
+    const double lockTime = (currentSnapshot != nullptr) ? currentSnapshot->phaseLockTime : -1.0;
+    lockSample = (juce::int64) std::llround(juce::jmax(0.0, lockTime) * sampleRate);
+
+    if (lockTime > 0.0 && lockSample > 0)
+    {
+        lockWindowStart = juce::jmax((juce::int64) 0,
+                                     lockSample - (juce::int64) std::llround(kLockWindowSec * sampleRate));
+        lockPending = true;
+    }
+
+    // With a lock the note starts from zero - sin(0) = 0, the click-free start the factory amp
+    // envelope relies on - and the rotation is applied at the lock node instead.
+    phase      = lockPending ? 0.0 : rotateRadians;
     envSamples = 0;
     hasExceededIdleThreshold = false;
     state   = State::Playing;

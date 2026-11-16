@@ -6,7 +6,7 @@
 //
 // Shape:
 //   ENVELOPE
-//     NODE { time, value, cpOutTime, cpOutValue, cpInTime, cpInValue, keytrack? }
+//     NODE { time, value, cpOutTime, cpOutValue, cpInTime, cpInValue, keytrack?, phaseLock? }
 //     NODE { ... }
 //     ...
 //
@@ -38,6 +38,11 @@ namespace EnvelopeIDs
     // a node without it is not keytracked, which is exactly what every node saved before Phase 6
     // meant, so older presets need no migration.
     static const juce::Identifier keytrack    { "keytrack" };
+
+    // Phase 6 §3.6: the node the Sub's phase is locked at, so edits before it cannot shift the
+    // waveform after it. At most one per envelope (setPhaseLock enforces it). Optional, like
+    // keytrack - absent means not locked.
+    static const juce::Identifier phaseLock   { "phaseLock" };
 }
 
 // EnvelopeModel — owns one node-based envelope as a ValueTree (schema above)
@@ -66,6 +71,7 @@ public:
         double cpOutTime = 0.0, cpOutValue = 0.0; // outgoing control point (toward next node)
         double cpInTime  = 0.0, cpInValue  = 0.0; // incoming control point (from previous node)
         bool   keytrack  = false;                 // follows the played note (Phase 6 §3.5)
+        bool   phaseLock = false;                 // the Sub's phase is locked here (Phase 6 §3.6)
     };
 
     // Inserts a new node at (time, value), keeping nodes ordered by time.
@@ -96,6 +102,13 @@ public:
     // flagged nodes shift with the keyboard, the unflagged foundation stays put). Only meaningful
     // on a pitch envelope; the amp envelope never reads it. One undo step.
     void setKeytrack(int index, bool shouldTrack);
+
+    // Locks the Sub's phase at the node at index (§3.6), clearing the lock from any other node -
+    // there is only ever one lock point. One undo step for the whole move.
+    void setPhaseLock(int index);
+
+    // Removes the phase lock wherever it is. One undo step; a no-op when nothing is locked.
+    void clearPhaseLock();
 
     int getNumNodes() const { return tree.getNumChildren(); }
     Node getNode(int index) const;

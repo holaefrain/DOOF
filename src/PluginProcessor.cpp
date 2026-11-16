@@ -96,6 +96,8 @@ DOOFAudioProcessor::DOOFAudioProcessor()
         cached.subHarmRatio  = apvts.getRawParameterValue(ParamIDs::layerSubHarmRatio(i));
         cached.subHarmDecay  = apvts.getRawParameterValue(ParamIDs::layerSubHarmDecay(i));
         cached.subHarmPreset = apvts.getRawParameterValue(ParamIDs::layerSubHarmPreset(i));
+        cached.subPhase      = apvts.getRawParameterValue(ParamIDs::layerSubPhase(i));
+        jassert(cached.subPhase != nullptr);
         jassert(cached.subSustain != nullptr && cached.subHarmGain != nullptr
                  && cached.subHarmRatio != nullptr && cached.subHarmDecay != nullptr
                  && cached.subHarmPreset != nullptr);
@@ -321,6 +323,15 @@ DOOFAudioProcessor::createParameterLayout()
             ParamIDs::harmPresetChoices(),
             (int) SubVoice::HarmonicSet::all
         ));
+
+        // 0 degrees is the sin(0) start every note has always had.
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::layerSubPhase(i), 1 },
+            "Layer " + layerNumber + " Phase",
+            juce::NormalisableRange<float>(0.0f, 360.0f),
+            0.0f,
+            juce::AudioParameterFloatAttributes().withLabel("deg")
+        ));
     }
 
     return layout;
@@ -445,6 +456,7 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         layer.subVoice.setTuning(keyRoot, tuneCents);
         const auto& cached = layerParams[(size_t) i];
         layer.subVoice.setSustain(cached.subSustain->load() > 0.5f);
+        layer.subVoice.setPhaseRotation(cached.subPhase->load());
         layer.subVoice.setHarmonics(cached.subHarmGain->load(), cached.subHarmRatio->load(),
                                     (double) cached.subHarmDecay->load(),
                                     (SubVoice::HarmonicSet) juce::jlimit(0, SubVoice::kNumHarmonicSets - 1,

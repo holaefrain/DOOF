@@ -38,7 +38,8 @@ void EnvelopePublisher::rebuildAndPublish()
 
     auto* newSnapshot = new EnvelopeSnapshot(std::move(pitchTable), std::move(ampTable),
                                              std::move(keytrackTable),
-                                             EnvelopeEvaluator::sustainLoopSpan(pitchModel));
+                                             EnvelopeEvaluator::sustainLoopSpan(pitchModel),
+                                             EnvelopeEvaluator::phaseLockTime(pitchModel));
     const auto* oldSnapshot = current.exchange(newSnapshot, std::memory_order_acq_rel);
 
     if (oldSnapshot != nullptr)

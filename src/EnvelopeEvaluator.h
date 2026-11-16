@@ -49,4 +49,8 @@ namespace EnvelopeEvaluator
     };
 
     LoopSpan sustainLoopSpan(const EnvelopeModel& pitchModel);
+
+    // Time of the phase-locked node (§3.6), or -1 when none is locked. Should there ever be more
+    // than one - setPhaseLock prevents it, but a hand-edited preset could - the first one wins.
+    double phaseLockTime(const EnvelopeModel& pitchModel);
 }

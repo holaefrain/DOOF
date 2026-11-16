@@ -93,6 +93,43 @@ void EnvelopeModel::setKeytrack(int index, bool shouldTrack)
     tree.getChild(index).setProperty(EnvelopeIDs::keytrack, shouldTrack, &undoManager);
 }
 
+void EnvelopeModel::setPhaseLock(int index)
+{
+    jassert(juce::isPositiveAndBelow(index, tree.getNumChildren()));
+    if (!inGesture)
+        undoManager.beginNewTransaction();
+
+    for (int i = 0; i < tree.getNumChildren(); ++i)
+    {
+        auto node = tree.getChild(i);
+        const bool shouldLock = (i == index);
+
+        // Only touched where it changes, so the undo step holds exactly the move and nothing more.
+        if ((bool) node.getProperty(EnvelopeIDs::phaseLock, false) != shouldLock)
+            node.setProperty(EnvelopeIDs::phaseLock, shouldLock, &undoManager);
+    }
+}
+
+void EnvelopeModel::clearPhaseLock()
+{
+    bool anyLocked = false;
+    for (int i = 0; i < tree.getNumChildren(); ++i)
+        anyLocked = anyLocked || (bool) tree.getChild(i).getProperty(EnvelopeIDs::phaseLock, false);
+
+    if (! anyLocked)
+        return;
+
+    if (!inGesture)
+        undoManager.beginNewTransaction();
+
+    for (int i = 0; i < tree.getNumChildren(); ++i)
+    {
+        auto node = tree.getChild(i);
+        if ((bool) node.getProperty(EnvelopeIDs::phaseLock, false))
+            node.setProperty(EnvelopeIDs::phaseLock, false, &undoManager);
+    }
+}
+
 void EnvelopeModel::setLength(double newLength)
 {
     if (!inGesture)
@@ -116,7 +153,8 @@ EnvelopeModel::Node EnvelopeModel::getNode(int index) const
     n.cpOutValue = node[EnvelopeIDs::cpOutValue];
     n.cpInTime   = node[EnvelopeIDs::cpInTime];
     n.cpInValue  = node[EnvelopeIDs::cpInValue];
-    n.keytrack   = node.getProperty(EnvelopeIDs::keytrack, false); // absent before Phase 6
+    n.keytrack   = node.getProperty(EnvelopeIDs::keytrack, false);  // absent before Phase 6
+    n.phaseLock  = node.getProperty(EnvelopeIDs::phaseLock, false); // likewise
     return n;
 }
 

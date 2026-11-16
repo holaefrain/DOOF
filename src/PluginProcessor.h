@@ -176,6 +176,7 @@ private:
         std::atomic<float>* subHarmRatio  = nullptr;
         std::atomic<float>* subHarmDecay  = nullptr;
         std::atomic<float>* subHarmPreset = nullptr;
+        std::atomic<float>* subPhase      = nullptr;
     };
 
     std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;

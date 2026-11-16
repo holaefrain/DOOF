@@ -17,9 +17,10 @@ struct EnvelopeSnapshot
     // built before Phase 6 meant, and what tests that only care about pitch and amp still pass.
     EnvelopeSnapshot(std::vector<float> pitch, std::vector<float> amp,
                      std::vector<float> keytrack = {},
-                     EnvelopeEvaluator::LoopSpan loop = {})
+                     EnvelopeEvaluator::LoopSpan loop = {},
+                     double lockTime = -1.0)
         : pitchTable(std::move(pitch)), ampTable(std::move(amp)), keytrackTable(std::move(keytrack)),
-          sustainLoop(loop)
+          sustainLoop(loop), phaseLockTime(lockTime)
     {
         jassert(keytrackTable.empty() || keytrackTable.size() == pitchTable.size());
     }
@@ -34,6 +35,9 @@ struct EnvelopeSnapshot
     // Phase 6 §3.5: the stretch sustain mode loops over while a note is held - first to last
     // keytracked node. Invalid (the default) when fewer than two nodes are flagged.
     const EnvelopeEvaluator::LoopSpan sustainLoop;
+
+    // Phase 6 §3.6: when the Sub's phase is locked, in seconds, or -1 for no lock.
+    const double phaseLockTime;
 
     // Both tables share this domain/resolution (EnvelopeEvaluator::kTableSize /
     // kTableDomainSeconds at construction time). Stored here so audio-thread
