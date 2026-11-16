@@ -67,6 +67,41 @@ namespace PitchSnap
         return snapped;
     }
 
+    // Reads a note typed by a person: a name in Ableton's convention ("C3", "F#1", "Bb-1", case
+    // ignored) or a bare MIDI number ("60"). Returns -1 for anything else, or a note outside 0-127,
+    // so a caller can keep its current value rather than jump somewhere arbitrary.
+    inline int noteFromName(const juce::String& typed)
+    {
+        const auto text = typed.trim().toUpperCase();
+        if (text.isEmpty())
+            return -1;
+
+        if (text.containsOnly("0123456789"))
+        {
+            const int number = text.getIntValue();
+            return juce::isPositiveAndBelow(number, 128) ? number : -1;
+        }
+
+        static const int letterSemitone[] { 9, 11, 0, 2, 4, 5, 7 }; // A B C D E F G
+        const auto letter = text[0];
+        if (letter < 'A' || letter > 'G')
+            return -1;
+
+        int semitone = letterSemitone[letter - 'A'];
+        int pos = 1;
+
+        if (text[pos] == '#')      { ++semitone; ++pos; }
+        else if (text[pos] == 'B') { --semitone; ++pos; } // "BB" is B flat: the first B is the letter
+
+        const auto octaveText = text.substring(pos);
+        if (octaveText.isEmpty() || ! octaveText.trimCharactersAtStart("-").containsOnly("0123456789")
+            || octaveText.trimCharactersAtStart("-").isEmpty())
+            return -1;
+
+        const int note = (octaveText.getIntValue() + 2) * 12 + semitone;
+        return juce::isPositiveAndBelow(note, 128) ? note : -1;
+    }
+
     // Note names as Ableton prints them, where middle C (60) is C3 and MIDI 0 is C-2.
     inline juce::String noteName(int midiNote)
     {

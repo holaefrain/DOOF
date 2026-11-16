@@ -7,11 +7,14 @@
 // [0,1]. The initial view duration matches whichever model's Length (§Step 5)
 // is currently longer, so the whole work area is visible on load without
 // needing to zoom/pan first; the user can zoom/pan from there (Step 4).
-const char* const DOOFAudioProcessorEditor::placeholderID = "contextualPlaceholder";
+const char* const DOOFAudioProcessorEditor::placeholderID   = "contextualPlaceholder";
+const char* const DOOFAudioProcessorEditor::tuneSliderID    = "masterTune";
+const char* const DOOFAudioProcessorEditor::keyRootSliderID = "keyRoot";
 
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
       clickPanel(p.apvts, p.getClickSamples()),
+      subPanel(p.apvts),
       envelopeCanvas(p.getLayer(0).pitchModel, juce::Range<double>(20.0, 220.0),
                      p.getLayer(0).ampModel,   juce::Range<double>(0.0, 1.0),
                      juce::jmax(p.getLayer(0).pitchModel.getLength(), p.getLayer(0).ampModel.getLength()), p)
@@ -25,6 +28,37 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
         audioProcessor.getLayerViewPrefs(selectedLayer).pitchLogScale = useLog;
         envelopeCanvas.setPitchLogScale(useLog);
     };
+    pitchSnapToggle.onClick = [this]
+    {
+        const bool snap = pitchSnapToggle.getToggleState();
+        audioProcessor.getLayerViewPrefs(selectedLayer).pitchSnap = snap;
+        envelopeCanvas.setPitchSnap(snap);
+    };
+
+    // Global tuning. The attachments install the parameters' text; Tune's is then replaced with a
+    // cents readout, while Key Root keeps its own, which already reads and parses note names.
+    tuneSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    tuneSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 20);
+    tuneSlider.setComponentID(tuneSliderID);
+    keyRootSlider.setSliderStyle(juce::Slider::IncDecButtons);
+    keyRootSlider.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 44, 20);
+    keyRootSlider.setComponentID(keyRootSliderID);
+
+    tuneAttachment    = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+                            p.apvts, ParamIDs::masterTune, tuneSlider);
+    keyRootAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+                            p.apvts, ParamIDs::masterKeyRoot, keyRootSlider);
+
+    tuneSlider.textFromValueFunction = [](double cents)
+    {
+        return (cents > 0.0 ? "+" : "") + juce::String(cents, 1) + " c";
+    };
+    tuneSlider.valueFromTextFunction = [](const juce::String& text) { return text.trim().getDoubleValue(); };
+    tuneSlider.updateText();
+
+    for (auto* label : { &tuneCaption, &keyRootCaption })
+        label->setColour(juce::Label::textColourId, juce::Colours::white);
+
     undoButton.onClick = [this] { performUndo(); };
     redoButton.onClick = [this] { performRedo(); };
 
@@ -138,8 +172,9 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
 
     for (int i = 0; i < DOOFAudioProcessor::getNumLayers(); ++i)
     {
-        layerTypeParams[(size_t) i] = audioProcessor.apvts.getRawParameterValue(ParamIDs::layerType(i));
-        jassert(layerTypeParams[(size_t) i] != nullptr);
+        layerTypeParams[(size_t) i]    = audioProcessor.apvts.getRawParameterValue(ParamIDs::layerType(i));
+        layerSustainParams[(size_t) i] = audioProcessor.apvts.getRawParameterValue(ParamIDs::layerSubSustain(i));
+        jassert(layerTypeParams[(size_t) i] != nullptr && layerSustainParams[(size_t) i] != nullptr);
     }
 
     contextualPlaceholder.setComponentID(placeholderID);
@@ -147,11 +182,17 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     contextualPlaceholder.setColour(juce::Label::textColourId, juce::Colours::grey);
     addChildComponent(contextualPlaceholder); // added but not shown; the panel decides
     addChildComponent(clickPanel);            // likewise
+    addChildComponent(subPanel);              // likewise
 
     // Children must be added before setSize(), which triggers the initial
     // resized() layout pass — a lesson from Phase 3 Step 0's spike.
     addAndMakeVisible(envelopeCanvas);
     addAndMakeVisible(pitchLogToggle);
+    addAndMakeVisible(pitchSnapToggle);
+    addAndMakeVisible(tuneCaption);
+    addAndMakeVisible(tuneSlider);
+    addAndMakeVisible(keyRootCaption);
+    addAndMakeVisible(keyRootSlider);
     addAndMakeVisible(undoButton);
     addAndMakeVisible(redoButton);
     addAndMakeVisible(editingCurveBox);
@@ -161,7 +202,8 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     addAndMakeVisible(ampLengthValue);
     addAndMakeVisible(savePresetButton);
     addAndMakeVisible(loadPresetButton);
-    setSize(800, 600);
+    // 700 tall so the canvas keeps its pre-Phase-6 height with the Sub panel beneath it.
+    setSize(800, 700);
 
     // The editor is always built against state that already exists - plugin open, preset load,
     // session restore - so the toolbar has to show the selected layer's stored view immediately
@@ -203,6 +245,7 @@ void DOOFAudioProcessorEditor::resized()
 
     auto topBar = bounds.removeFromTop(24);
     pitchLogToggle.setBounds(topBar.removeFromLeft(160).reduced(2));
+    pitchSnapToggle.setBounds(topBar.removeFromLeft(120).reduced(2));
     undoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     redoButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     editingCurveBox.setBounds(topBar.removeFromLeft(100).reduced(2));
@@ -214,6 +257,12 @@ void DOOFAudioProcessorEditor::resized()
     ampLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
     savePresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
     loadPresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
+
+    // The global tuning pair, at the right of the second bar.
+    keyRootSlider.setBounds(secondBar.removeFromRight(100).reduced(2));
+    keyRootCaption.setBounds(secondBar.removeFromRight(64).reduced(2));
+    tuneSlider.setBounds(secondBar.removeFromRight(150).reduced(2));
+    tuneCaption.setBounds(secondBar.removeFromRight(40).reduced(2));
 
     // The layer selector (§4.3), above the canvas and spanning the full width. Cells are divided
     // by remaining width rather than a fixed size, so the row still fills a resized window; the
@@ -227,10 +276,14 @@ void DOOFAudioProcessorEditor::resized()
         layerStrips[i]->setBounds(isLast ? layerBar : layerBar.removeFromLeft(cellWidth));
     }
 
-    // All three occupy the same space; refreshContextualPanel decides which one is visible.
-    envelopeCanvas.setBounds(bounds);
+    // The click panel and the placeholder take the whole editing area. A Sub layer splits it: the
+    // canvas above, its SubPanel below. refreshContextualPanel decides which set is visible.
     contextualPlaceholder.setBounds(bounds);
     clickPanel.setBounds(bounds);
+
+    auto canvasArea = bounds;
+    subPanel.setBounds(canvasArea.removeFromBottom(kSubPanelHeight));
+    envelopeCanvas.setBounds(canvasArea);
 }
 
 void DOOFAudioProcessorEditor::applyViewPrefsToUI()
@@ -242,6 +295,8 @@ void DOOFAudioProcessorEditor::applyViewPrefsToUI()
     // selectedLayer is assigned before this runs. Suppressing the notification too means that
     // ordering is not the single thing standing between a layer switch and silent data loss.
     pitchLogToggle.setToggleState(prefs.pitchLogScale, juce::dontSendNotification);
+    pitchSnapToggle.setToggleState(prefs.pitchSnap, juce::dontSendNotification);
+    envelopeCanvas.setPitchSnap(prefs.pitchSnap);
     editingCurveBox.setSelectedId(prefs.editingPitch ? kEditingPitchId : kEditingAmpId,
                                    juce::dontSendNotification);
 
@@ -273,7 +328,13 @@ void DOOFAudioProcessorEditor::refreshContextualPanel()
     // live over an empty panel would let you edit a layer that isn't on screen. Undo/redo and
     // preset save/load stay put: they are global, not per-layer.
     pitchLogToggle.setVisible(isSub);
+    pitchSnapToggle.setVisible(isSub);
     editingCurveBox.setVisible(isSub);
+
+    // Re-pointed before it is shown, like the click panel below.
+    if (isSub)
+        subPanel.setLayer(selectedLayer);
+    subPanel.setVisible(isSub);
     pitchLengthCaption.setVisible(isSub);
     pitchLengthValue.setVisible(isSub);
     ampLengthCaption.setVisible(isSub);
@@ -298,6 +359,9 @@ void DOOFAudioProcessorEditor::timerCallback()
     // box follows through its attachment, but the panel's status line needs telling.
     if (clickPanel.isVisible())
         clickPanel.refreshStatus();
+
+    // Sustain can be automated too; the canvas draws the loop band only while it is on.
+    envelopeCanvas.setSustainLoopShown(layerSustainParams[(size_t) selectedLayer]->load() > 0.5f);
 }
 
 void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)

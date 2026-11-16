@@ -192,6 +192,7 @@ void EnvelopeCanvas::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xff1a1a1a));
 
     drawBeatGrid(g);
+    drawPitchMarks(g);
     drawEnvelope(g, *pitchModel, pitchRange, juce::Colours::cyan,   pitchLogScale);
     drawEnvelope(g, *ampModel,   ampRange,   juce::Colours::orange, false); // amp always linear
     drawLengthHandle(g, *pitchModel, juce::Colours::cyan);
@@ -314,7 +315,12 @@ void EnvelopeCanvas::showContextMenu(NodeHit hit)
     if (hit.index != -1)
         menu.addItem("Delete Node", [this, hit] { deleteNodeAt(hit); });
     if (hit.index != -1 && hit.isPitch)
+    {
+        const auto node = pitchModel->getNode(hit.index);
         menu.addItem("Snap to Nearest Note", [this, hit] { snapNodeToNote(hit.index); });
+        menu.addItem("Keytrack", true, node.keytrack, [this, hit] { toggleKeytrack(hit.index); });
+        menu.addItem("Lock Phase Here", true, node.phaseLock, [this, hit] { togglePhaseLock(hit.index); });
+    }
     menu.addItem("Reset Curve", [this, isPitch] { resetCurve(isPitch); });
     menu.addItem("Copy Curve",  [this, isPitch] { copyCurve(isPitch); });
     menu.addItem("Paste Curve", [this, isPitch] { pasteCurve(isPitch); });
@@ -693,4 +699,71 @@ void EnvelopeCanvas::snapNodeToNote(int index)
     const double snapped = PitchSnap::snapWithin(node.value, pitchRange.getStart(), pitchRange.getEnd());
     model.moveNode(index, node.time, snapped);
     repaint();
+}
+
+void EnvelopeCanvas::toggleKeytrack(int index)
+{
+    if (! juce::isPositiveAndBelow(index, pitchModel->getNumNodes()))
+        return;
+
+    pitchModel->setKeytrack(index, ! pitchModel->getNode(index).keytrack);
+    repaint();
+}
+
+void EnvelopeCanvas::togglePhaseLock(int index)
+{
+    if (! juce::isPositiveAndBelow(index, pitchModel->getNumNodes()))
+        return;
+
+    if (pitchModel->getNode(index).phaseLock)
+        pitchModel->clearPhaseLock();
+    else
+        pitchModel->setPhaseLock(index);
+
+    repaint();
+}
+
+void EnvelopeCanvas::drawPitchMarks(juce::Graphics& g) const
+{
+    const auto& model = *pitchModel;
+    const auto height = (float) getHeight();
+
+    // The loop band, under everything else.
+    if (sustainLoopShown)
+    {
+        const auto loop = EnvelopeEvaluator::sustainLoopSpan(model);
+        if (loop.isValid())
+        {
+            const float x0 = timeToX(loop.start), x1 = timeToX(loop.end);
+            g.setColour(juce::Colours::cyan.withAlpha(0.08f));
+            g.fillRect(juce::Rectangle<float>(x0, 0.0f, x1 - x0, height));
+            g.setColour(juce::Colours::cyan.withAlpha(0.6f));
+            g.setFont(juce::Font(juce::FontOptions(11.0f)));
+            g.drawText("SUSTAIN LOOP", juce::Rectangle<float>(x0 + 4.0f, 4.0f, 100.0f, 14.0f),
+                       juce::Justification::centredLeft);
+        }
+    }
+
+    for (int i = 0; i < model.getNumNodes(); ++i)
+    {
+        const auto node = model.getNode(i);
+        const auto px = toPixel(node.time, node.value, pitchRange, pitchLogScale);
+
+        if (node.phaseLock)
+        {
+            const float dashes[] { 4.0f, 4.0f };
+            g.setColour(juce::Colours::magenta.withAlpha(0.8f));
+            g.drawDashedLine(juce::Line<float>(px.x, 0.0f, px.x, height), dashes, 2, 1.5f);
+            g.setFont(juce::Font(juce::FontOptions(11.0f)));
+            g.drawText("PHASE LOCK", juce::Rectangle<float>(px.x + 4.0f, height - 30.0f, 90.0f, 14.0f),
+                       juce::Justification::centredLeft);
+        }
+
+        if (node.keytrack)
+        {
+            static constexpr float kRingRadius = 8.0f;
+            g.setColour(juce::Colours::white);
+            g.drawEllipse(px.x - kRingRadius, px.y - kRingRadius, kRingRadius * 2.0f, kRingRadius * 2.0f, 1.5f);
+        }
+    }
 }

@@ -6,6 +6,7 @@
 #include "EnvelopeCanvas.h"
 #include "PluginEditor.h"
 #include "ClickPanel.h"
+#include "SubPanel.h"
 #include "PitchSnap.h"
 
 #include <juce_dsp/juce_dsp.h> // FFT for Phase5VerifyTest (c)
@@ -1540,10 +1541,14 @@ public:
     }
 
 private:
-    // The canvas maps pitch onto the range [20, 220] over a 472 px height, so the seeded first
-    // node at (t=0, 150 Hz) lands here. Computed rather than hunted for, so a mapping change
-    // shows up as this test missing the node instead of quietly hitting something else.
-    static juce::Point<float> pitchNodeZeroPixel() { return { 0.0f, 165.2f }; }
+    // The canvas maps pitch onto the range [20, 220] over its height, so the seeded first node at
+    // (t=0, 150 Hz) lands 130/200 of the way up. Computed from the live height rather than hunted
+    // for, so a mapping change shows up as this test missing the node instead of quietly hitting
+    // something else - and a layout change (Phase 6 put a panel under the canvas) cannot.
+    static juce::Point<float> pitchNodeZeroPixel(const juce::Component& canvas)
+    {
+        return { 0.0f, (float) canvas.getHeight() * (1.0f - 130.0f / 200.0f) };
+    }
 
     static juce::MouseEvent mouseEventAt(juce::Component* c, juce::Point<float> position,
                                           int clicks = 1, bool wasDragged = false)
@@ -1693,7 +1698,7 @@ private:
         const double originalValue = pitch.getNode(0).value;
 
         // Begin a node drag on layer 1 and leave it open.
-        canvases[0]->mouseDown(mouseEventAt(canvases[0], pitchNodeZeroPixel()));
+        canvases[0]->mouseDown(mouseEventAt(canvases[0], pitchNodeZeroPixel(*canvases[0])));
         canvases[0]->mouseDrag(mouseEventAt(canvases[0], { 40.0f, 220.0f }, 1, true));
 
         // Without this the rest of the test is vacuous: if the press missed the node handle no
@@ -3727,6 +3732,343 @@ private:
 };
 
 static Phase6CanvasSnapTest phase6CanvasSnapTest;
+
+// Phase6EditorTest — the Phase 6 controls in the editor.
+//   (a) A Sub layer shows the canvas with its SubPanel and the snap toggle; Click and Off do not.
+//   (b) SubPanel drives the selected layer's parameters only, and re-points on selection.
+//   (c) SubPanel reads in units: percent, ms (s from a second up), degrees - typed back too.
+//   (d) The global Tune and Key Root controls drive their parameters; Key Root reads and parses
+//       note names.
+//   (e) Snap to Note is remembered per layer and reaches the canvas.
+//   (f) The node-menu actions keytrack and lock the selected layer's nodes, undoably.
+//   (g) The canvas shows the sustain loop band exactly while the layer's sustain is on.
+class Phase6EditorTest : public juce::UnitTest
+{
+public:
+    Phase6EditorTest() : juce::UnitTest("Phase6Editor") {}
+
+    void runTest() override
+    {
+        testPanelsFollowTheType();
+        testSubPanelTargetsTheSelectedLayer();
+        testSubPanelUnits();
+        testGlobalTuningControls();
+        testSnapTogglePerLayer();
+        testNodeMenuActions();
+        testLoopBandFollowsSustain();
+    }
+
+private:
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    static float paramValue(DOOFAudioProcessor& processor, const juce::String& id)
+    {
+        return processor.apvts.getRawParameterValue(id)->load();
+    }
+
+    struct Editor
+    {
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> editor;
+        juce::Component* subPanel = nullptr;
+        juce::Component* clickPanel = nullptr;
+        EnvelopeCanvas* canvas = nullptr;
+        juce::Array<LayerStrip*> strips;
+
+        template <typename T> T* sub(const char* id) const
+        {
+            return subPanel != nullptr ? dynamic_cast<T*>(subPanel->findChildWithID(id)) : nullptr;
+        }
+
+        template <typename T> T* top(const char* id) const { return dynamic_cast<T*>(editor->findChildWithID(id)); }
+
+        juce::Button* buttonNamed(const juce::String& text) const
+        {
+            for (auto* child : editor->getChildren())
+                if (auto* button = dynamic_cast<juce::Button*>(child))
+                    if (button->getButtonText() == text)
+                        return button;
+            return nullptr;
+        }
+    };
+
+    // Layers 1 and 3 Sub, 2 Click, 4 and 5 Off - set before the editor opens.
+    static void open(Editor& e)
+    {
+        setParamValue(e.processor, ParamIDs::layerType(1), (float) (int) ParamIDs::LayerType::click);
+        setParamValue(e.processor, ParamIDs::layerType(2), (float) (int) ParamIDs::LayerType::sub);
+
+        e.editor.reset(e.processor.createEditor());
+        e.editor->setBounds(0, 0, 800, 700);
+
+        for (auto* child : e.editor->getChildren())
+        {
+            if (auto* strip = dynamic_cast<LayerStrip*>(child))   e.strips.add(strip);
+            if (auto* canvas = dynamic_cast<EnvelopeCanvas*>(child)) e.canvas = canvas;
+        }
+
+        e.subPanel   = e.editor->findChildWithID(SubPanel::panelID);
+        e.clickPanel = e.editor->findChildWithID(ClickPanel::panelID);
+    }
+
+    static void clickStrip(Editor& e, int index)
+    {
+        auto* strip = e.strips[index];
+        strip->mouseDown(juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), {},
+                                           juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                           strip, strip, juce::Time::getCurrentTime(), {},
+                                           juce::Time::getCurrentTime(), 1, false));
+    }
+
+    bool ready(const Editor& e)
+    {
+        const bool ok = e.subPanel != nullptr && e.clickPanel != nullptr && e.canvas != nullptr && e.strips.size() == 5;
+        expect(ok, "The editor is missing the Sub panel, the click panel, the canvas or a strip");
+        return ok;
+    }
+
+    // (a)
+    void testPanelsFollowTheType()
+    {
+        beginTest("(a) Sub shows the canvas with its panel and snap toggle; Click and Off do not");
+
+        Editor e;
+        open(e);
+        if (! ready(e))
+            return;
+
+        auto* snap = e.buttonNamed("Snap to Note");
+        expect(snap != nullptr, "No Snap to Note toggle");
+        if (snap == nullptr)
+            return;
+
+        expect(e.canvas->isVisible() && e.subPanel->isVisible() && snap->isVisible(),
+               "A Sub layer does not show the canvas, its Sub panel and the snap toggle together");
+
+        // The panel sits under the canvas, not over it.
+        expect(e.subPanel->getY() >= e.canvas->getBottom(), "The Sub panel overlaps the canvas");
+
+        clickStrip(e, 1);
+        expect(! e.subPanel->isVisible() && ! snap->isVisible() && e.clickPanel->isVisible(),
+               "A Click layer still shows Sub controls, or not its own panel");
+
+        clickStrip(e, 3);
+        expect(! e.subPanel->isVisible() && ! e.canvas->isVisible(), "An Off layer shows Sub controls");
+
+        clickStrip(e, 2);
+        expect(e.subPanel->isVisible(), "Returning to a Sub layer did not bring its panel back");
+    }
+
+    // (b)
+    void testSubPanelTargetsTheSelectedLayer()
+    {
+        beginTest("(b) The Sub panel drives the selected layer only, and re-points on selection");
+
+        Editor e;
+        setParamValue(e.processor, ParamIDs::layerSubHarmGain(2), 0.3f);
+        setParamValue(e.processor, ParamIDs::layerSubPhase(2), 45.0f);
+        open(e);
+        if (! ready(e))
+            return;
+
+        auto* gain    = e.sub<juce::Slider>(SubPanel::harmGainID);
+        auto* ratio   = e.sub<juce::Slider>(SubPanel::harmRatioID);
+        auto* decay   = e.sub<juce::Slider>(SubPanel::harmDecayID);
+        auto* phase   = e.sub<juce::Slider>(SubPanel::phaseID);
+        auto* preset  = e.sub<juce::ComboBox>(SubPanel::presetBoxID);
+        auto* sustain = e.sub<juce::Button>(SubPanel::sustainID);
+        expect(gain && ratio && decay && phase && preset && sustain, "The Sub panel is missing a control");
+        if (! (gain && ratio && decay && phase && preset && sustain))
+            return;
+
+        // Layer 1 is selected on open.
+        gain->setValue(0.7, juce::sendNotificationSync);
+        ratio->setValue(0.2, juce::sendNotificationSync);
+        decay->setValue(0.5, juce::sendNotificationSync);
+        phase->setValue(120.0, juce::sendNotificationSync);
+        preset->setSelectedItemIndex(2, juce::sendNotificationSync);
+        sustain->setToggleState(true, juce::sendNotificationSync);
+
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmGain(0)),  0.7f, 1.0e-4f, "Gain missed layer 1");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmRatio(0)), 0.2f, 1.0e-4f, "Ratio missed layer 1");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmDecay(0)), 0.5f, 1.0e-4f, "Decay missed layer 1");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubPhase(0)),   120.0f, 1.0e-3f, "Phase missed layer 1");
+        expectEquals((int) paramValue(e.processor, ParamIDs::layerSubHarmPreset(0)), 2, "The preset missed layer 1");
+        expect(paramValue(e.processor, ParamIDs::layerSubSustain(0)) > 0.5f, "Sustain missed layer 1");
+
+        // Layer 3 untouched by all of that, and shown as itself once selected.
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmGain(2)), 0.3f, 1.0e-4f, "Layer 1's gain reached layer 3");
+
+        clickStrip(e, 2);
+        expectWithinAbsoluteError((float) gain->getValue(),  0.3f,  1.0e-4f, "Gain still shows layer 1 after selecting layer 3");
+        expectWithinAbsoluteError((float) phase->getValue(), 45.0f, 1.0e-3f, "Phase still shows layer 1 after selecting layer 3");
+        expect(! sustain->getToggleState(), "Sustain still shows layer 1 after selecting layer 3");
+
+        gain->setValue(0.9, juce::sendNotificationSync);
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmGain(2)), 0.9f, 1.0e-4f, "After switching, Gain does not drive layer 3");
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmGain(0)), 0.7f, 1.0e-4f, "Editing layer 3 reached back into layer 1");
+    }
+
+    // (c)
+    void testSubPanelUnits()
+    {
+        beginTest("(c) The Sub panel reads in percent, ms or s, and degrees, and parses them back");
+
+        expectEquals(SubPanel::percentToText(0.5),  juce::String("50%"));
+        expectEquals(SubPanel::timeToText(0.15),    juce::String("150 ms"));
+        expectEquals(SubPanel::timeToText(1.25),    juce::String("1.25 s"));
+        expectEquals(SubPanel::degreesToText(90.0), juce::String("90 deg"));
+
+        expectWithinAbsoluteError(SubPanel::timeFromText("40"),    0.040, 1.0e-12, "A bare number is not milliseconds");
+        expectWithinAbsoluteError(SubPanel::timeFromText("40 ms"), 0.040, 1.0e-12);
+        expectWithinAbsoluteError(SubPanel::timeFromText("1.5 s"), 1.5,   1.0e-12, "\"1.5 s\" was not read as seconds");
+        expectWithinAbsoluteError(SubPanel::percentFromText("25%"), 0.25, 1.0e-12);
+
+        // And through a live slider, where the attachment would otherwise have installed its own.
+        Editor e;
+        open(e);
+        if (! ready(e))
+            return;
+
+        auto* decay = e.sub<juce::Slider>(SubPanel::harmDecayID);
+        auto* phase = e.sub<juce::Slider>(SubPanel::phaseID);
+        if (decay == nullptr || phase == nullptr)
+            return;
+
+        expectEquals(decay->getTextFromValue(0.15), juce::String("150 ms"), "The live Decay knob is not showing ms");
+        decay->setValue(decay->getValueFromText("40"), juce::sendNotificationSync);
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::layerSubHarmDecay(0)), 0.040f, 1.0e-5f, "Typing 40 did not store 40 ms");
+        expectEquals(phase->getTextFromValue(90.0), juce::String("90 deg"));
+    }
+
+    // (d)
+    void testGlobalTuningControls()
+    {
+        beginTest("(d) Tune and Key Root drive their parameters; Key Root reads and parses note names");
+
+        Editor e;
+        open(e);
+        if (! ready(e))
+            return;
+
+        auto* tune = e.top<juce::Slider>(DOOFAudioProcessorEditor::tuneSliderID);
+        auto* root = e.top<juce::Slider>(DOOFAudioProcessorEditor::keyRootSliderID);
+        expect(tune != nullptr && root != nullptr, "The editor has no Tune or Key Root control");
+        if (tune == nullptr || root == nullptr)
+            return;
+
+        tune->setValue(-25.0, juce::sendNotificationSync);
+        expectWithinAbsoluteError(paramValue(e.processor, ParamIDs::masterTune), -25.0f, 1.0e-3f, "Tune did not reach master.tune");
+        expectEquals(tune->getTextFromValue(12.0), juce::String("+12.0 c"));
+
+        expectEquals(root->getTextFromValue(60.0), juce::String("C3"), "Key Root does not read as a note name");
+
+        struct Typed { const char* text; int note; };
+        for (const auto t : { Typed { "A2", 57 }, Typed { "f#1", 42 }, Typed { "Bb-1", 22 },
+                              Typed { "48", 48 }, Typed { "nonsense", 60 } })
+        {
+            root->setValue(root->getValueFromText(t.text), juce::sendNotificationSync);
+            expectEquals((int) paramValue(e.processor, ParamIDs::masterKeyRoot), t.note,
+                         juce::String("Typing \"") + t.text + "\" into Key Root");
+        }
+    }
+
+    // (e)
+    void testSnapTogglePerLayer()
+    {
+        beginTest("(e) Snap to Note is remembered per layer and reaches the canvas");
+
+        Editor e;
+        open(e);
+        if (! ready(e))
+            return;
+
+        auto* snap = e.buttonNamed("Snap to Note");
+        if (snap == nullptr)
+            return;
+
+        snap->setToggleState(true, juce::sendNotificationSync);
+        expect(e.processor.getLayerViewPrefs(0).pitchSnap, "The toggle did not reach layer 1's preference");
+        expect(e.canvas->isPitchSnapOn(), "The toggle did not reach the canvas");
+
+        clickStrip(e, 2);
+        expect(! snap->getToggleState() && ! e.canvas->isPitchSnapOn(),
+               "Layer 3 shows layer 1's snap setting");
+        expect(e.processor.getLayerViewPrefs(0).pitchSnap, "Selecting layer 3 cleared layer 1's preference");
+
+        clickStrip(e, 0);
+        expect(snap->getToggleState() && e.canvas->isPitchSnapOn(), "Returning to layer 1 lost its snap setting");
+    }
+
+    // (f) The menu itself is a popup that cannot be clicked headless; these are the actions it calls.
+    void testNodeMenuActions()
+    {
+        beginTest("(f) The node menu's Keytrack and Lock Phase actions edit the selected layer, undoably");
+
+        Editor e;
+        open(e);
+        if (! ready(e))
+            return;
+
+        clickStrip(e, 2); // layer 3, a Sub
+        auto& pitch = e.processor.getLayer(2).pitchModel;
+
+        e.canvas->toggleKeytrack(1);
+        expect(pitch.getNode(1).keytrack, "Keytrack did not flag layer 3's node");
+        expect(! e.processor.getLayer(0).pitchModel.getNode(1).keytrack, "Keytrack reached layer 1");
+
+        e.canvas->togglePhaseLock(0);
+        e.canvas->togglePhaseLock(1);
+        expect(! pitch.getNode(0).phaseLock && pitch.getNode(1).phaseLock, "Locking a second node did not move the lock");
+
+        e.canvas->togglePhaseLock(1);
+        expectEquals(EnvelopeEvaluator::phaseLockTime(pitch), -1.0, "Toggling the locked node did not remove the lock");
+
+        // Undo walks back through all of it, one step each, via the editor's own Undo button.
+        auto* undo = e.buttonNamed("Undo");
+        if (undo == nullptr || undo->onClick == nullptr)
+            return;
+
+        undo->onClick();
+        expect(pitch.getNode(1).phaseLock, "Undo did not restore the removed lock");
+        undo->onClick();
+        expect(pitch.getNode(0).phaseLock && ! pitch.getNode(1).phaseLock, "Undo did not move the lock back in one step");
+        undo->onClick();
+        undo->onClick();
+        expect(! pitch.getNode(1).keytrack, "Undo did not clear the keytrack flag");
+    }
+
+    // (g)
+    void testLoopBandFollowsSustain()
+    {
+        beginTest("(g) The canvas shows the sustain loop band exactly while the layer's sustain is on");
+
+        Editor e;
+        open(e);
+        if (! ready(e))
+            return;
+
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+        expect(! e.canvas->isSustainLoopShown(), "The loop band shows with sustain off");
+
+        // Automated, so only the poll can notice.
+        setParamValue(e.processor, ParamIDs::layerSubSustain(0), 1.0f);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+        expect(e.canvas->isSustainLoopShown(), "The loop band did not appear when sustain was switched on");
+
+        // Layer 3's sustain is off: selecting it hides the band again.
+        clickStrip(e, 2);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+        expect(! e.canvas->isSustainLoopShown(), "The loop band follows layer 1 while layer 3 is selected");
+    }
+};
+
+static Phase6EditorTest phase6EditorTest;
 
 
 

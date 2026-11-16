@@ -72,6 +72,25 @@ public:
     void setPitchSnap(bool shouldSnap) { pitchSnap = shouldSnap; }
     bool isPitchSnapOn() const { return pitchSnap; }
 
+    // The actions behind a pitch node's right-click menu items (Phase 6). Public because a popup
+    // menu cannot be clicked in a headless test; the menu itself only calls these. Each is one undo
+    // step on the shared history.
+    void toggleKeytrack(int pitchNodeIndex);  // §3.5 selective keytracking
+    void togglePhaseLock(int pitchNodeIndex); // §3.6: lock here, or remove the lock if it is here
+
+    // Whether the selected layer has sustain mode on. The loop band between the first and last
+    // keytracked nodes is drawn only then - without sustain those nodes just keytrack, and a band
+    // would claim a loop that will never play. Set by the editor's poll.
+    bool isSustainLoopShown() const { return sustainLoopShown; }
+    void setSustainLoopShown(bool shown)
+    {
+        if (shown != sustainLoopShown)
+        {
+            sustainLoopShown = shown;
+            repaint();
+        }
+    }
+
     // Called after either model's Length changes via the canvas handle drag,
     // so external UI (e.g. the editor's numeric fields) can refresh. Not
     // called for changes made some other way (e.g. directly via the model).
@@ -234,6 +253,11 @@ private:
     juce::AudioProcessor& processor;
     bool pitchLogScale = false;
     bool pitchSnap = false;
+    bool sustainLoopShown = false;
+
+    // Draws the Phase 6 marks over the pitch curve: a ring on each keytracked node, a dashed line
+    // and label at the phase lock, and the sustain loop band when it is live.
+    void drawPitchMarks(juce::Graphics& g) const;
 
     // The pitch readout while dragging: "C1  65.41 Hz" on a note, "67.0 Hz  C1 +42c" between.
     static juce::String pitchReadout(double hz);

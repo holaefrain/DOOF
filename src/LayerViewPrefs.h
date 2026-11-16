@@ -19,4 +19,5 @@ struct LayerViewPrefs
 {
     bool pitchLogScale = false; // vertical axis for the pitch curve; false = linear
     bool editingPitch  = true;  // which curve double-click-to-add targets; false = amp
+    bool pitchSnap     = false; // Phase 6 §3.5: drags and adds land on the nearest note
 };

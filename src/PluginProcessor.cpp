@@ -8,7 +8,7 @@
 //
 //   DOOFState { version }
 //     DOOF_State                                  <- apvts.copyState(), all 21 parameters
-//     LAYER { index, logScale, editingPitch }     <- one per layer, five of them
+//     LAYER { index, logScale, editingPitch, pitchSnap }  <- one per layer, five of them
 //       ENVELOPE { curve="pitch", ... }
 //       ENVELOPE { curve="amp",   ... }
 //
@@ -19,6 +19,9 @@
 //   absent - Phase 3: no version, both ENVELOPE trees straight on the root, describing one layer.
 //   2      - Phase 4: LAYER children, five of them. No view preferences.
 //   3      - Phase 4: adds logScale/editingPitch to each LAYER.
+//   4      - Phase 6: adds pitchSnap to each LAYER. Pitch NODEs may now carry keytrack/phaseLock,
+//            and the APVTS holds the Phase 6 parameters; all three default to the pre-Phase-6
+//            behaviour when absent, so reading a version 3 file needs no branch either.
 //
 // Only the flat layout needs detecting explicitly, which absence of versionProp does. Reading a
 // version 2 file needs no branch of its own: the view preferences are read with defaults, and the
@@ -32,11 +35,12 @@ namespace PresetIDs
     static const juce::Identifier versionProp       { "version" };
     static const juce::Identifier logScaleProp      { "logScale" };
     static const juce::Identifier editingPitchProp  { "editingPitch" };
+    static const juce::Identifier pitchSnapProp     { "pitchSnap" };
     static const juce::String pitchCurveTag = "pitch";
     static const juce::String ampCurveTag   = "amp";
 
     // Bumped whenever the layout above changes shape; Phase 5 and Phase 7 will both need it again.
-    static constexpr int currentVersion = 3;
+    static constexpr int currentVersion = 4;
 }
 
 // Construct the processor, declare the bus layout, and initialise the APVTS.
@@ -213,6 +217,12 @@ DOOFAudioProcessor::createParameterLayout()
         ParamIDs::keyRootDefault,
         juce::AudioParameterIntAttributes()
             .withStringFromValueFunction([](int note, int) { return ParamIDs::noteName(note); })
+            // Typed text that is not a note keeps the default rather than becoming MIDI 0.
+            .withValueFromStringFunction([](const juce::String& text)
+            {
+                const int note = PitchSnap::noteFromName(text);
+                return note >= 0 ? note : ParamIDs::keyRootDefault;
+            })
     ));
 
     // Per-layer mixer parameters (§3.2, §3.3): type, level, mute, solo.
@@ -654,6 +664,7 @@ void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         const auto& prefs = layerViewPrefs[(size_t) i];
         layerNode.setProperty(PresetIDs::logScaleProp,     prefs.pitchLogScale, nullptr);
         layerNode.setProperty(PresetIDs::editingPitchProp, prefs.editingPitch,  nullptr);
+        layerNode.setProperty(PresetIDs::pitchSnapProp,    prefs.pitchSnap,     nullptr);
 
         auto pitchCopy = getLayer(i).pitchModel.getValueTree().createCopy();
         pitchCopy.setProperty(PresetIDs::curveProp, PresetIDs::pitchCurveTag, nullptr);
@@ -714,6 +725,7 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
             auto& prefs = layerViewPrefs[(size_t) index];
             prefs.pitchLogScale = layerNode.getProperty(PresetIDs::logScaleProp,     fallback.pitchLogScale);
             prefs.editingPitch  = layerNode.getProperty(PresetIDs::editingPitchProp, fallback.editingPitch);
+            prefs.pitchSnap     = layerNode.getProperty(PresetIDs::pitchSnapProp,    fallback.pitchSnap);
         }
     }
     else

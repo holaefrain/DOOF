@@ -3,6 +3,7 @@
 #include "EnvelopeCanvas.h"
 #include "LayerStrip.h"
 #include "ClickPanel.h"
+#include "SubPanel.h"
 #include <array>
 #include <memory>
 
@@ -34,6 +35,10 @@ public:
     // Component ID on the placeholder below, so a test can find it without this class exposing
     // its children. Same approach as LayerStrip's control IDs.
     static const char* const placeholderID;
+
+    // Component IDs on the global tuning controls, for tests (Phase 6).
+    static const char* const tuneSliderID;
+    static const char* const keyRootSliderID;
 
 private:
     // Shared by keyPressed and the undo/redo buttons. Either model's
@@ -94,6 +99,9 @@ private:
     // Every layer's type parameter, resolved once so the poll does no string lookups.
     std::array<std::atomic<float>*, LayerAudibility::kNumLayers> layerTypeParams { };
 
+    // Every layer's sustain parameter, for the canvas's loop band (Phase 6), likewise.
+    std::array<std::atomic<float>*, LayerAudibility::kNumLayers> layerSustainParams { };
+
     // Stands in for the canvas when the selected layer has nothing to edit - one switched Off.
     // Occupies the canvas's bounds so the swap reads as the panel changing rather than as the
     // window emptying.
@@ -103,6 +111,13 @@ private:
     // a Click. One panel re-pointed at whichever layer is selected, like the canvas.
     ClickPanel clickPanel;
 
+    // The Sub layer's controls (Phase 6): harmonics, sustain, phase. Shown under the canvas when
+    // the selected layer is a Sub, re-pointed at whichever layer that is.
+    SubPanel subPanel;
+
+    // Height SubPanel takes from the bottom of the editing area when it is showing.
+    static constexpr int kSubPanelHeight = 110;
+
     // The central canvas (§3.4): pitch + amp curves overlaid on one time axis.
     // Declared after audioProcessor since its constructor reads model
     // references out of it.
@@ -110,6 +125,18 @@ private:
 
     // Log/Linear vertical-axis toggle for the pitch curve (§3.4).
     juce::ToggleButton pitchLogToggle { "Log Scale (Pitch)" };
+
+    // Pitch snap (§3.5), per layer like the log toggle: drags and adds land on the nearest note.
+    juce::ToggleButton pitchSnapToggle { "Snap to Note" };
+
+    // Global tuning (Phase 6, §3.5): master tuning in cents, and the key root keytracked nodes
+    // play as drawn at. Attached once - they are the same for every layer.
+    juce::Label  tuneCaption    { {}, "Tune" };
+    juce::Slider tuneSlider;
+    juce::Label  keyRootCaption { {}, "Key Root" };
+    juce::Slider keyRootSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tuneAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> keyRootAttachment;
 
     // On-screen undo/redo, mirroring the Cmd+Z / Cmd+Shift+Z shortcuts.
     juce::TextButton undoButton { "Undo" };
