@@ -4070,6 +4070,234 @@ private:
 
 static Phase6EditorTest phase6EditorTest;
 
+// Phase6StateTest — every Phase 6 setting survives a save and reload, and a preset from before
+// Phase 6 loads with all of them at their defaults.
+//   (a) Round trip: master tune, key root, each layer's harmonics/sustain/phase, the keytrack and
+//       phase-lock node flags, and the snap preference - checked one by one and by a null-matched
+//       render that exercises them (an off-root note, a held-then-released sustain).
+//   (b) A version 3 preset resets every Phase 6 setting to its default, rather than inheriting the
+//       outgoing patch's.
+class Phase6StateTest : public juce::UnitTest
+{
+public:
+    Phase6StateTest() : juce::UnitTest("Phase6State") {}
+
+    void runTest() override
+    {
+        testRoundTrip();
+        testVersion3PresetLoadsWithDefaults();
+    }
+
+private:
+    static constexpr double kSampleRate = 44100.0;
+    static constexpr int kNumSamples = (int) (kSampleRate * 1.5);
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    static float paramValue(DOOFAudioProcessor& processor, const juce::String& id)
+    {
+        return processor.apvts.getRawParameterValue(id)->load();
+    }
+
+    // Note 67 against the default root of 60, held to 0.9 s, so keytracking, sustain and the release
+    // all shape the render.
+    static std::vector<float> render(DOOFAudioProcessor& processor)
+    {
+        processor.prepareToPlay(kSampleRate, 512);
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, 512);
+        const int release = (int) (kSampleRate * 0.9);
+
+        for (int start = 0; start < kNumSamples; start += 512)
+        {
+            juce::MidiBuffer midi;
+            if (start == 0)
+                midi.addEvent(juce::MidiMessage::noteOn(1, 67, (juce::uint8) 100), 0);
+            if (release >= start && release < start + 512)
+                midi.addEvent(juce::MidiMessage::noteOff(1, 67), release - start);
+
+            processor.processBlock(buffer, midi);
+            out.insert(out.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + 512);
+        }
+        return out;
+    }
+
+    struct LayerSettings { float gain, ratio, decay, preset, sustain, phase; };
+    static constexpr LayerSettings kSaved[] {
+        { 0.6f, 0.3f, 0.05f, 1.0f, 1.0f, 90.0f },
+        { 0.2f, 0.7f, 0.40f, 2.0f, 0.0f, 10.0f },
+        { 0.0f, 0.5f, 0.15f, 3.0f, 1.0f, 300.0f },
+        { 0.9f, 0.1f, 1.20f, 0.0f, 0.0f, 180.0f },
+        { 0.4f, 0.9f, 0.01f, 3.0f, 1.0f, 45.0f },
+    };
+
+    static void applySavedState(DOOFAudioProcessor& p)
+    {
+        setParamValue(p, ParamIDs::masterTune, 23.0f);
+        setParamValue(p, ParamIDs::masterKeyRoot, 55.0f);
+
+        for (int i = 0; i < p.getNumLayers(); ++i)
+        {
+            const auto& c = kSaved[i];
+            setParamValue(p, ParamIDs::layerType(i), (float) (int) ParamIDs::LayerType::sub);
+            setParamValue(p, ParamIDs::layerLevel(i), 0.3f);
+            setParamValue(p, ParamIDs::layerSubHarmGain(i),   c.gain);
+            setParamValue(p, ParamIDs::layerSubHarmRatio(i),  c.ratio);
+            setParamValue(p, ParamIDs::layerSubHarmDecay(i),  c.decay);
+            setParamValue(p, ParamIDs::layerSubHarmPreset(i), c.preset);
+            setParamValue(p, ParamIDs::layerSubSustain(i),    c.sustain);
+            setParamValue(p, ParamIDs::layerSubPhase(i),      c.phase);
+
+            // Factory pitch nodes are (0, 150) and (0.3, 50). Add a foundation node and give each
+            // layer a different flag layout: both keytracked (a loop) on even layers, a phase lock
+            // on the foundation on odd ones.
+            auto& pitch = p.getLayer(i).pitchModel;
+            const int foundation = pitch.addNode(0.5, 45.0 + i);
+            if (i % 2 == 0) { pitch.setKeytrack(0, true); pitch.setKeytrack(1, true); }
+            else            { pitch.setPhaseLock(foundation); }
+
+            p.getLayerViewPrefs(i).pitchSnap = (i % 2 == 1);
+        }
+    }
+
+    void testRoundTrip()
+    {
+        beginTest("(a) Every Phase 6 setting survives save and reload, and the render null-matches");
+
+        DOOFAudioProcessor processor;
+        applySavedState(processor);
+        const auto before = render(processor);
+
+        juce::MemoryBlock saved;
+        processor.getStateInformation(saved);
+
+        // Scramble everything the preset describes.
+        setParamValue(processor, ParamIDs::masterTune, -80.0f);
+        setParamValue(processor, ParamIDs::masterKeyRoot, 30.0f);
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            setParamValue(processor, ParamIDs::layerSubHarmGain(i), 1.0f);
+            setParamValue(processor, ParamIDs::layerSubHarmPreset(i), 0.0f);
+            setParamValue(processor, ParamIDs::layerSubSustain(i), 0.0f);
+            setParamValue(processor, ParamIDs::layerSubPhase(i), 359.0f);
+            auto& pitch = processor.getLayer(i).pitchModel;
+            for (int n = 0; n < pitch.getNumNodes(); ++n)
+                pitch.setKeytrack(n, ! pitch.getNode(n).keytrack);
+            pitch.setPhaseLock(0);
+            processor.getLayerViewPrefs(i).pitchSnap = ! processor.getLayerViewPrefs(i).pitchSnap;
+        }
+
+        processor.setStateInformation(saved.getData(), (int) saved.getSize());
+
+        expectWithinAbsoluteError(paramValue(processor, ParamIDs::masterTune), 23.0f, 1.0e-3f, "master.tune did not come back");
+        expectEquals((int) paramValue(processor, ParamIDs::masterKeyRoot), 55, "master.keyRoot did not come back");
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto& c = kSaved[i];
+            const auto where = " on layer " + juce::String(i + 1);
+
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubHarmGain(i)),  c.gain,  1.0e-5f, "harmGain" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubHarmRatio(i)), c.ratio, 1.0e-5f, "harmRatio" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubHarmDecay(i)), c.decay, 1.0e-4f, "harmDecay" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubHarmPreset(i)), c.preset, 1.0e-6f, "harmPreset" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubSustain(i)), c.sustain, 1.0e-6f, "sustain" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubPhase(i)), c.phase, 1.0e-3f, "phase" + where);
+
+            const auto& pitch = processor.getLayer(i).pitchModel;
+            expectEquals(pitch.getNumNodes(), 3, "Node count" + where);
+            expect(pitch.getNode(0).keytrack == (i % 2 == 0) && pitch.getNode(1).keytrack == (i % 2 == 0)
+                       && ! pitch.getNode(2).keytrack,
+                   "Keytrack flags did not come back" + where);
+            expect(! pitch.getNode(0).phaseLock && pitch.getNode(2).phaseLock == (i % 2 == 1),
+                   "The phase lock did not come back" + where);
+            expect(processor.getLayerViewPrefs(i).pitchSnap == (i % 2 == 1), "Snap to Note did not come back" + where);
+        }
+
+        const auto after = render(processor);
+        double worst = 0.0;
+        for (size_t n = 0; n < before.size(); ++n)
+            worst = juce::jmax(worst, std::abs((double) before[n] - after[n]));
+
+        expect(worst < 1.0e-7, "The reloaded render does not null-match (worst " + juce::String(worst) + ")");
+
+        float peak = 0.0f;
+        for (const auto v : before)
+            peak = juce::jmax(peak, std::abs(v));
+        expect(peak > 0.1f, "The render is near-silent, so the null-match proves little");
+    }
+
+    // A version 3 file, made the honest way: save, then strip exactly what version 4 added.
+    void testVersion3PresetLoadsWithDefaults()
+    {
+        beginTest("(b) A version 3 preset loads with every Phase 6 setting at its default");
+
+        juce::MemoryBlock v3;
+        {
+            DOOFAudioProcessor writer;
+            juce::MemoryBlock saved;
+            writer.getStateInformation(saved);
+
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            auto root = juce::ValueTree::fromXml(*xml);
+            root.setProperty("version", 3, nullptr);
+
+            // The APVTS child loses every Phase 6 parameter; each LAYER loses pitchSnap.
+            auto params = root.getChildWithName("DOOF_State");
+            for (int i = params.getNumChildren() - 1; i >= 0; --i)
+            {
+                const auto id = params.getChild(i).getProperty("id").toString();
+                if (id.startsWith("master.") || id.contains(".sub."))
+                    params.removeChild(i, nullptr);
+            }
+            for (auto layer : root)
+                layer.removeProperty("pitchSnap", nullptr);
+
+            auto stripped = root.createXml();
+            juce::AudioProcessor::copyXmlToBinary(*stripped, v3);
+        }
+
+        // Load it over a processor carrying non-default Phase 6 settings everywhere.
+        DOOFAudioProcessor processor;
+        applySavedState(processor);
+        processor.setStateInformation(v3.getData(), (int) v3.getSize());
+
+        expectWithinAbsoluteError(paramValue(processor, ParamIDs::masterTune), 0.0f, 1.0e-6f, "master.tune was not reset");
+        expectEquals((int) paramValue(processor, ParamIDs::masterKeyRoot), 60, "master.keyRoot was not reset to C3");
+
+        for (int i = 0; i < processor.getNumLayers(); ++i)
+        {
+            const auto where = " on layer " + juce::String(i + 1);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubHarmGain(i)), 0.0f, 1.0e-6f, "Harmonics left on" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubSustain(i)), 0.0f, 1.0e-6f, "Sustain left on" + where);
+            expectWithinAbsoluteError(paramValue(processor, ParamIDs::layerSubPhase(i)), 0.0f, 1.0e-6f, "Phase not reset" + where);
+            expect(! processor.getLayerViewPrefs(i).pitchSnap, "Snap to Note left on" + where);
+
+            const auto& pitch = processor.getLayer(i).pitchModel;
+            for (int n = 0; n < pitch.getNumNodes(); ++n)
+                expect(! pitch.getNode(n).keytrack && ! pitch.getNode(n).phaseLock,
+                       "A node flag survived a preset that predates them" + where);
+        }
+
+        // And it sounds like the factory patch it describes.
+        DOOFAudioProcessor factory;
+        const auto expected = render(factory);
+        const auto loaded = render(processor);
+        double worst = 0.0;
+        for (size_t n = 0; n < expected.size(); ++n)
+            worst = juce::jmax(worst, std::abs((double) expected[n] - loaded[n]));
+        expect(worst < 1.0e-7, "A version 3 factory preset does not sound like the factory patch (worst "
+                                   + juce::String(worst) + ")");
+    }
+};
+
+static Phase6StateTest phase6StateTest;
+
 
 
 
