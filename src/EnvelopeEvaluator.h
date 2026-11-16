@@ -38,4 +38,15 @@ namespace EnvelopeEvaluator
     // a point moves, not where it is, and a time blend is what keeps it monotonic between nodes.
     // An empty model, or one with nothing flagged, gives all zeros - no keytracking at all.
     std::vector<float> buildKeytrackTable(const EnvelopeModel& model);
+
+    // The stretch sustain mode loops over (Phase 6 §3.5: "loop between keytracked nodes while
+    // held"): from the first keytracked node to the last. Needs at least two flagged nodes at
+    // different times - with fewer there is nothing to loop between, and sustain mode does nothing.
+    struct LoopSpan
+    {
+        double start = -1.0, end = -1.0; // seconds; both -1 when there is no loop
+        bool isValid() const { return start >= 0.0 && end > start; }
+    };
+
+    LoopSpan sustainLoopSpan(const EnvelopeModel& pitchModel);
 }

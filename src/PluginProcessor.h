@@ -166,6 +166,9 @@ private:
         std::atomic<float>* clickType  = nullptr;
         std::atomic<float>* clickTone  = nullptr;
         std::atomic<float>* clickDecay = nullptr;
+
+        // Phase 6's Sub controls, likewise read once per block and latched by SubVoice at note-on.
+        std::atomic<float>* subSustain = nullptr;
     };
 
     std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;

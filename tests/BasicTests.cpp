@@ -1811,7 +1811,8 @@ namespace Phase6Fixtures
     {
         return EnvelopeSnapshot(EnvelopeEvaluator::buildTable(pitch),
                                 EnvelopeEvaluator::buildTable(amp),
-                                EnvelopeEvaluator::buildKeytrackTable(pitch));
+                                EnvelopeEvaluator::buildKeytrackTable(pitch),
+                                EnvelopeEvaluator::sustainLoopSpan(pitch));
     }
 
     // A flat, full-level amp envelope, so a frequency measurement is never fighting a decay.
@@ -2087,6 +2088,314 @@ private:
 };
 
 static Phase6KeytrackTest phase6KeytrackTest;
+
+// Phase6SustainTest — sustain mode (§3.5: "loop between keytracked nodes while held, then finish
+// the tail on release").
+//   (a) The loop runs from the first keytracked node to the last, and needs two of them.
+//   (b) Held, the envelope keeps looping long past where it would have ended, and every pass
+//       replays the same pitch trajectory.
+//   (c) Released, it plays on from where it was, through the loop end, and finishes the tail.
+//   (d) Sustain off, or released before the loop end, a note-off changes nothing at all.
+//   (e) The wrap is click-free even though the loop's two ends differ in level.
+//   (f) Monophonic note-offs: an older key's release never cuts the newer note short.
+//   (g) With fewer than two keytracked nodes, sustain mode does nothing.
+class Phase6SustainTest : public juce::UnitTest
+{
+public:
+    Phase6SustainTest() : juce::UnitTest("Phase6Sustain") {}
+
+    void runTest() override
+    {
+        testLoopSpan();
+        testHeldNoteLoops();
+        testReleaseFinishesTheTail();
+        testNoteOffChangesNothingWithoutALoop();
+        testWrapIsClickFree();
+        testMonophonicNoteOffs();
+        testNeedsTwoKeytrackedNodes();
+    }
+
+private:
+    static constexpr double kSr = Phase6Fixtures::kSampleRate;
+
+    // The loop runs 0.05 -> 0.25 s, between the two flagged nodes. Amp is 1.0 at the loop start
+    // and 0.5 at its end, so a wrap without the crossfade steps the level by half - the case the
+    // crossfade exists for. After the loop the tail settles at 50 Hz and fades to silence at 1 s.
+    struct Patch
+    {
+        EnvelopeModel pitch, amp;
+
+        explicit Patch(bool flagBoth = true)
+        {
+            pitch.addNode(0.0,  200.0);
+            pitch.addNode(0.05, 150.0);
+            pitch.addNode(0.25, 100.0);
+            pitch.addNode(0.6,  50.0);
+            pitch.addNode(1.0,  50.0);
+            pitch.setKeytrack(1, true);
+            if (flagBoth)
+                pitch.setKeytrack(2, true);
+
+            amp.addNode(0.0,  1.0);
+            amp.addNode(0.05, 1.0);
+            amp.addNode(0.25, 0.5);
+            amp.addNode(0.6,  0.5);
+            amp.addNode(1.0,  0.0);
+        }
+    };
+
+    static constexpr juce::int64 kLoopStart = 2205;  // 0.05 s at 44.1 kHz
+    static constexpr juce::int64 kLoopEnd   = 11025; // 0.25 s
+    static constexpr juce::int64 kLoopLen   = kLoopEnd - kLoopStart;
+
+    struct Event { int sample; bool on; int note; };
+
+    // Renders `events` (in sample order) from a freshly prepared voice.
+    static std::vector<float> render(const EnvelopeSnapshot& snapshot, bool sustain,
+                                     std::vector<Event> events, int numSamples)
+    {
+        SubVoice voice;
+        voice.prepare(kSr);
+        voice.setSnapshot(&snapshot);
+        voice.setTuning(60, 0.0f);
+        voice.setSustain(sustain);
+
+        std::vector<float> out((std::size_t) numSamples);
+        std::size_t next = 0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            for (; next < events.size() && events[next].sample == i; ++next)
+            {
+                if (events[next].on) voice.noteOn(events[next].note);
+                else                 voice.noteOff(events[next].note);
+            }
+            out[(std::size_t) i] = voice.processSample();
+        }
+        return out;
+    }
+
+    static double rms(const std::vector<float>& buf, int from, int to)
+    {
+        double sum = 0.0;
+        for (int i = from; i < to; ++i)
+            sum += (double) buf[(std::size_t) i] * buf[(std::size_t) i];
+        return std::sqrt(sum / (to - from));
+    }
+
+    static int lastNonZero(const std::vector<float>& buf)
+    {
+        for (int i = (int) buf.size() - 1; i >= 0; --i)
+            if (buf[(std::size_t) i] != 0.0f)
+                return i;
+        return -1;
+    }
+
+    static int firstDifference(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (std::memcmp(&a[i], &b[i], sizeof(float)) != 0)
+                return (int) i;
+        return -1;
+    }
+
+    // (a)
+    void testLoopSpan()
+    {
+        beginTest("(a) The loop runs from the first keytracked node to the last, and needs two");
+
+        EnvelopeModel model;
+        model.addNode(0.0, 200.0);
+        model.addNode(0.1, 150.0);
+        model.addNode(0.3, 100.0);
+        model.addNode(0.5, 60.0);
+
+        expect(! EnvelopeEvaluator::sustainLoopSpan(model).isValid(), "No flagged node, yet a loop");
+
+        model.setKeytrack(1, true);
+        expect(! EnvelopeEvaluator::sustainLoopSpan(model).isValid(), "One flagged node, yet a loop");
+
+        model.setKeytrack(3, true);
+        auto span = EnvelopeEvaluator::sustainLoopSpan(model);
+        expect(span.isValid(), "Two flagged nodes, but no loop");
+        expectWithinAbsoluteError(span.start, 0.1, 1.0e-12, "Loop does not start at the first flagged node");
+        expectWithinAbsoluteError(span.end,   0.5, 1.0e-12, "Loop does not end at the last flagged node");
+
+        // A flagged node between them widens nothing - the span is first to last.
+        model.setKeytrack(2, true);
+        span = EnvelopeEvaluator::sustainLoopSpan(model);
+        expectWithinAbsoluteError(span.end, 0.5, 1.0e-12, "A middle flagged node moved the loop end");
+    }
+
+    // (b)
+    void testHeldNoteLoops()
+    {
+        beginTest("(b) A held note keeps looping, replaying the same pitch trajectory each pass");
+
+        Patch patch;
+        const auto snapshot = Phase6Fixtures::snapshotOf(patch.pitch, patch.amp);
+        const int length = (int) (kSr * 2.0);
+
+        const auto held   = render(snapshot, true,  { { 0, true, 60 } }, length);
+        const auto plain  = render(snapshot, false, { { 0, true, 60 } }, length);
+
+        // Unlooped, the amp envelope reaches zero at 1 s and the voice stops.
+        expect(lastNonZero(plain) < (int) (kSr * 1.01),
+               "Without sustain the note sounds past its envelope's end, at sample "
+                   + juce::String(lastNonZero(plain)));
+
+        expect(rms(held, (int) (kSr * 1.8), (int) (kSr * 1.95)) > 0.3,
+               "A held sustain note has stopped by 1.8 s; it is not looping");
+
+        // An early and a late stretch of the loop, on pass 1 and on pass 8. The pitch sweeps
+        // 150 -> 100 Hz across the loop, so the early stretch must sit clearly above the late one
+        // on both passes, and each must match its counterpart on the other pass.
+        //
+        // 1% rather than the 0.01% the steady-pitch tests hold to: zero crossings on a sweep land
+        // wherever the oscillator's phase puts them, and that phase is different on every pass, so
+        // a 40 ms window's estimate moves by a few tenths of a percent with it.
+        auto passWindow = [&](int pass, double fromEnv, double toEnv)
+        {
+            const double offset = pass * (double) kLoopLen / kSr;
+            return Phase6Fixtures::measureFrequency(held, fromEnv + offset, toEnv + offset);
+        };
+
+        for (const auto stretch : { std::pair<double, double> { 0.06, 0.10 }, { 0.18, 0.22 } })
+        {
+            const double first = passWindow(0, stretch.first, stretch.second);
+            const double eighth = passWindow(7, stretch.first, stretch.second);
+
+            expect(std::abs(eighth - first) < first * 0.01,
+                   "Envelope " + juce::String(stretch.first, 2) + "-" + juce::String(stretch.second, 2)
+                       + " s plays " + juce::String(eighth, 2) + " Hz on pass 8 but "
+                       + juce::String(first, 2) + " Hz on pass 1 - the loop is not replaying the same stretch");
+        }
+
+        for (const int pass : { 0, 7 })
+            expect(passWindow(pass, 0.06, 0.10) > passWindow(pass, 0.18, 0.22) + 20.0,
+                   "Pass " + juce::String(pass + 1) + " does not sweep down through the loop");
+    }
+
+    // (c) Released mid-pass at 1.33 s, the loop position is 0.13 s into the envelope (pass 6), so
+    // the rest of the loop, then the 0.25 -> 1.0 s tail, still has to play.
+    void testReleaseFinishesTheTail()
+    {
+        beginTest("(c) Released, the note plays on through the loop end and finishes the tail");
+
+        Patch patch;
+        const auto snapshot = Phase6Fixtures::snapshotOf(patch.pitch, patch.amp);
+
+        const int release = (int) (kSr * 1.33);
+        const auto out = render(snapshot, true, { { 0, true, 60 }, { release, false, 60 } },
+                                release + (int) (kSr * 1.5));
+
+        const int positionAtRelease = (int) (kLoopStart + (release - kLoopEnd) % kLoopLen);
+
+        // Not cut: the next 0.1 s is still loud.
+        expect(rms(out, release, release + (int) (kSr * 0.1)) > 0.3, "Releasing cut the note off");
+
+        // The tail's 50 Hz plateau, envelope time 0.65 -> 0.9 s.
+        const int tailFrom = release + (int) (kSr * 0.65) - positionAtRelease;
+        const int tailTo   = release + (int) (kSr * 0.90) - positionAtRelease;
+        const double tailHz = Phase6Fixtures::measureFrequency(out, tailFrom / kSr, tailTo / kSr);
+        expect(std::abs(tailHz - 50.0) < 0.05, "The tail after release plays " + juce::String(tailHz, 3)
+                                                   + " Hz, not the 50 Hz foundation");
+
+        // And it ends where the envelope does: 1.0 s of envelope time, give or take the idle level.
+        const int expectedEnd = release + (int) kSr - positionAtRelease;
+        const int end = lastNonZero(out);
+        expect(std::abs(end - expectedEnd) < (int) (kSr * 0.001),
+               "The released note ends at sample " + juce::String(end) + ", expected about "
+                   + juce::String(expectedEnd) + " where its tail runs out");
+    }
+
+    // (d) The two cases where sustain must leave no trace at all, bit for bit.
+    void testNoteOffChangesNothingWithoutALoop()
+    {
+        beginTest("(d) Without sustain, or released before the loop end, a note-off changes nothing");
+
+        Patch patch;
+        const auto snapshot = Phase6Fixtures::snapshotOf(patch.pitch, patch.amp);
+        const int length = (int) (kSr * 1.2);
+
+        const auto untouched = render(snapshot, false, { { 0, true, 60 } }, length);
+
+        const auto offWithoutSustain = render(snapshot, false, { { 0, true, 60 }, { 4410, false, 60 } }, length);
+        expectEquals(firstDifference(untouched, offWithoutSustain), -1,
+                     "A note-off changed the render with sustain off");
+
+        // Released at 0.2 s, before the crossfade into the first wrap starts (0.24 s).
+        const auto earlyRelease = render(snapshot, true, { { 0, true, 60 }, { 8820, false, 60 } }, length);
+        expectEquals(firstDifference(untouched, earlyRelease), -1,
+                     "A note released before the loop end still looped");
+    }
+
+    // (e) A plain jump from the loop end back to its start would step the level from 0.5 to 1.0.
+    // The biggest sample-to-sample change a 150 Hz sine at full level can make on its own is
+    // 2 pi 150 / 44100 = 0.0214, so anything clearly above that inside the loop is a click.
+    void testWrapIsClickFree()
+    {
+        beginTest("(e) Wrapping from the loop end to its start does not click");
+
+        Patch patch;
+        const auto snapshot = Phase6Fixtures::snapshotOf(patch.pitch, patch.amp);
+        const auto held = render(snapshot, true, { { 0, true, 60 } }, (int) (kSr * 2.0));
+
+        const double ceiling = juce::MathConstants<double>::twoPi * 150.0 / kSr * 1.05;
+
+        double worst = 0.0;
+        int worstAt = -1;
+        for (int i = (int) kLoopStart + 1; i < (int) held.size(); ++i)
+        {
+            const double jump = std::abs((double) held[(std::size_t) i] - held[(std::size_t) i - 1]);
+            if (jump > worst) { worst = jump; worstAt = i; }
+        }
+
+        expect(worst < ceiling, "A jump of " + juce::String(worst, 4) + " at sample "
+                                    + juce::String(worstAt) + " - more than a 150 Hz sine can move ("
+                                    + juce::String(ceiling, 4) + ") - the wrap is clicking");
+    }
+
+    // (f)
+    void testMonophonicNoteOffs()
+    {
+        beginTest("(f) An older key's release never cuts the newer note short");
+
+        Patch patch;
+        const auto snapshot = Phase6Fixtures::snapshotOf(patch.pitch, patch.amp);
+        const int length = (int) (kSr * 2.5);
+
+        // 60 down, 64 down at 0.5 s (chokes 60), 60 released at 0.8 s: 64 must still be looping.
+        const auto overlapped = render(snapshot, true,
+                                       { { 0, true, 60 }, { 22050, true, 64 }, { 35280, false, 60 } }, length);
+        expect(rms(overlapped, (int) (kSr * 2.2), (int) (kSr * 2.4)) > 0.3,
+               "Releasing the older key stopped the newer note's loop");
+
+        // 64 released while still inside the choke that leads into it: it starts already released.
+        const auto releasedInChoke = render(snapshot, true,
+                                            { { 0, true, 60 }, { 22050, true, 64 }, { 22060, false, 64 } }, length);
+        expect(lastNonZero(releasedInChoke) < (int) (kSr * 1.6),
+               "A note released during the choke into it went on looping, to sample "
+                   + juce::String(lastNonZero(releasedInChoke)));
+    }
+
+    // (g)
+    void testNeedsTwoKeytrackedNodes()
+    {
+        beginTest("(g) With one keytracked node, sustain mode does nothing");
+
+        Patch patch(false);
+        const auto snapshot = Phase6Fixtures::snapshotOf(patch.pitch, patch.amp);
+        const int length = (int) (kSr * 1.2);
+
+        const auto withSustain    = render(snapshot, true,  { { 0, true, 60 } }, length);
+        const auto withoutSustain = render(snapshot, false, { { 0, true, 60 } }, length);
+
+        expectEquals(firstDifference(withSustain, withoutSustain), -1,
+                     "Sustain changed a patch with only one keytracked node");
+    }
+};
+
+static Phase6SustainTest phase6SustainTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

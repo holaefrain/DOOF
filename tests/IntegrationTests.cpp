@@ -138,7 +138,7 @@ private:
 
     void testAllExpectedParametersExist()
     {
-        beginTest("(a) All 38 expected parameter IDs exist, and nothing extra");
+        beginTest("(a) All 43 expected parameter IDs exist, and nothing extra");
 
         DOOFAudioProcessor processor;
 
@@ -157,10 +157,13 @@ private:
             expected.add("layer" + n + ".click.type");
             expected.add("layer" + n + ".click.tone");
             expected.add("layer" + n + ".click.decay");
+
+            // Phase 6.
+            expected.add("layer" + n + ".sub.sustain");
         }
 
-        expectEquals(expected.size(), 38,
-                     "3 globals + 5 layers x (4 mixer + 3 click) controls");
+        expectEquals(expected.size(), 43,
+                     "3 globals + 5 layers x (4 mixer + 3 click + 1 sub) controls");
 
         for (const auto& id : expected)
             expect(processor.apvts.getParameter(id) != nullptr,
@@ -3340,6 +3343,152 @@ private:
 };
 
 static Phase5VerifyTest phase5VerifyTest;
+
+// Phase6SustainEngineTest — sustain mode through the real processor: the parameter reaches the
+// voice, and note-offs - ignored by the engine until Phase 6 - are dispatched at their sample.
+//   (a) With sustain off, a note-off leaves the render bit-identical to one without it.
+//   (b) With sustain on, a held note outlives its envelope, and a release lands on its sample at
+//       any block size.
+class Phase6SustainEngineTest : public juce::UnitTest
+{
+public:
+    Phase6SustainEngineTest() : juce::UnitTest("Phase6SustainEngine") {}
+
+    void runTest() override
+    {
+        testNoteOffIsInertWithoutSustain();
+        testSustainedReleaseIsSampleAccurate();
+    }
+
+private:
+    static constexpr double kSampleRate = 44100.0;
+
+    static void setParamValue(DOOFAudioProcessor& processor, const juce::String& id, float value)
+    {
+        auto* param = processor.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+
+    // Layer 1's factory sweep with its two nodes flagged, so the loop runs over the whole
+    // 150 -> 50 Hz sweep, 0 -> 0.3 s.
+    static void flagFactoryNodes(DOOFAudioProcessor& processor)
+    {
+        auto& pitch = processor.getLayer(0).pitchModel;
+        pitch.setKeytrack(0, true);
+        pitch.setKeytrack(1, true);
+    }
+
+    struct Event { int sample; bool on; };
+
+    static std::vector<float> render(DOOFAudioProcessor& processor, const std::vector<Event>& events,
+                                     int totalSamples, int blockSize)
+    {
+        processor.prepareToPlay(kSampleRate, blockSize);
+
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer(2, blockSize);
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int length = juce::jmin(blockSize, totalSamples - start);
+            buffer.setSize(2, length, false, false, true);
+
+            juce::MidiBuffer midi;
+            for (const auto& e : events)
+                if (e.sample >= start && e.sample < start + length)
+                    midi.addEvent(e.on ? juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100)
+                                       : juce::MidiMessage::noteOff(1, 60),
+                                  e.sample - start);
+
+            processor.processBlock(buffer, midi);
+            out.insert(out.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + length);
+        }
+        return out;
+    }
+
+    static int firstDifference(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        for (size_t i = 0; i < juce::jmin(a.size(), b.size()); ++i)
+            if (std::memcmp(&a[i], &b[i], sizeof(float)) != 0)
+                return (int) i;
+        return -1;
+    }
+
+    static double rms(const std::vector<float>& buf, int from, int to)
+    {
+        double sum = 0.0;
+        for (int i = from; i < to; ++i)
+            sum += (double) buf[(size_t) i] * buf[(size_t) i];
+        return std::sqrt(sum / (to - from));
+    }
+
+    // (a) Even with flagged nodes - so the loop exists and only the parameter keeps it shut.
+    void testNoteOffIsInertWithoutSustain()
+    {
+        beginTest("(a) With sustain off, a note-off changes nothing");
+
+        const int total = (int) (kSampleRate * 1.0);
+
+        DOOFAudioProcessor plain;
+        flagFactoryNodes(plain);
+        const auto withoutOff = render(plain, { { 0, true } }, total, 512);
+
+        DOOFAudioProcessor released;
+        flagFactoryNodes(released);
+        const auto withOff = render(released, { { 0, true }, { 2000, false } }, total, 512);
+
+        expectEquals(firstDifference(withoutOff, withOff), -1,
+                     "A note-off changed the render with sustain off");
+    }
+
+    // (b) The release is placed mid-block at 0.9 s, deep in the third or fourth pass.
+    void testSustainedReleaseIsSampleAccurate()
+    {
+        beginTest("(b) Sustained, a held note outlives its envelope and releases on its exact sample");
+
+        const int total = (int) (kSampleRate * 2.5);
+        const int release = (int) (kSampleRate * 0.9) + 37;
+
+        auto renderAt = [&](int blockSize)
+        {
+            DOOFAudioProcessor processor;
+            flagFactoryNodes(processor);
+            setParamValue(processor, ParamIDs::layerSubSustain(0), 1.0f);
+            return render(processor, { { 0, true }, { release, false } }, total, blockSize);
+        };
+
+        DOOFAudioProcessor unsustained;
+        flagFactoryNodes(unsustained);
+        const auto plain = render(unsustained, { { 0, true } }, total, 512);
+
+        const auto reference = renderAt(512);
+
+        // The factory amp envelope is all but gone by 0.6 s; looped, it is still sounding at 0.85.
+        expect(rms(plain, (int) (kSampleRate * 0.80), (int) (kSampleRate * 0.88)) < 0.01,
+               "The unsustained note is still loud at 0.8 s, so this check proves nothing");
+        expect(rms(reference, (int) (kSampleRate * 0.80), (int) (kSampleRate * 0.88)) > 0.05,
+               "The sustained note is not still sounding at 0.8 s - the parameter is not reaching the voice");
+
+        // Without this, a note-off that never reached the voice would still be block-size
+        // invariant. Released, the note dies away within its 0.4 s envelope; never released, it is
+        // still looping at the end.
+        DOOFAudioProcessor neverReleased;
+        flagFactoryNodes(neverReleased);
+        setParamValue(neverReleased, ParamIDs::layerSubSustain(0), 1.0f);
+        const auto held = render(neverReleased, { { 0, true } }, total, 512);
+
+        expect(rms(held, (int) (kSampleRate * 2.2), (int) (kSampleRate * 2.4)) > 0.05,
+               "A note that was never released has stopped looping");
+        expect(rms(reference, release + (int) (kSampleRate * 0.5), release + (int) (kSampleRate * 0.7)) < 1.0e-3,
+               "The released note is still sounding 0.5 s after its note-off - the release never arrived");
+
+        for (const int blockSize : { 64, 333, 1024 })
+            expectEquals(firstDifference(renderAt(blockSize), reference), -1,
+                         "At " + juce::String(blockSize) + "-sample blocks the release lands differently");
+    }
+};
+
+static Phase6SustainEngineTest phase6SustainEngineTest;
 
 
 

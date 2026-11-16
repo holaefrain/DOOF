@@ -102,4 +102,10 @@ namespace ParamIDs
     inline juce::String layerClickType  (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".click.type";  }
     inline juce::String layerClickTone  (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".click.tone";  }
     inline juce::String layerClickDecay (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".click.decay"; }
+
+    // ── Sub layer (Phase 6) ──────────────────────────────────────────────────
+
+    // Sustain mode (§3.5): loop between the keytracked nodes while a note is held, then finish the
+    // tail on release.
+    inline juce::String layerSubSustain (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".sub.sustain"; }
 }

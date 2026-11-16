@@ -11,6 +11,11 @@ void SubVoice::prepare(double sr)
     hasExceededIdleThreshold = false;
     semitoneShift = 0.0;
     tuneRatio     = 1.0;
+    sustainOn     = false;
+    currentNote   = -1;
+    held          = false;
+    pendingHeld   = false;
+    wrapCommitted = false;
     chokeTimer  = 0.0;
     chokeAmp    = 0.0;
     chokeFreq   = 0.0;
@@ -25,22 +30,79 @@ void SubVoice::noteOn(int midiNote)
 {
     if (state == State::Idle)
     {
-        startBody(midiNote);
+        startBody(midiNote, true);
     }
     else if (state == State::Playing)
     {
         // Capture the voice's current amplitude and frequency so the choke
         // fade starts seamlessly from the same level the oscillator was at.
-        chokeAmp   = ampAt(envTime());
-        chokeFreq  = pitchAt(envTime());
+        currentEnvelope(chokeAmp, chokeFreq);
         chokeTimer = 0.0;
         pendingNote = midiNote;
+        pendingHeld = true;
         state = State::Choking;
     }
     else // Choking — update pending note; let the in-progress fade finish
     {
         pendingNote = midiNote;
+        pendingHeld = true;
     }
+}
+
+void SubVoice::noteOff(int midiNote)
+{
+    if (state == State::Choking && midiNote == pendingNote)
+        pendingHeld = false; // released before its body even began
+    else if (state == State::Playing && midiNote == currentNote)
+        held = false;
+}
+
+// The current snapshot's sustain loop converted to samples, with its crossfade length. Recomputed
+// per sample rather than cached at note-on, so editing the loop while a note is held takes effect
+// on the next pass - the same as every other envelope edit.
+SubVoice::LoopSamples SubVoice::loopSamples() const
+{
+    LoopSamples loop;
+    if (currentSnapshot == nullptr || ! currentSnapshot->sustainLoop.isValid())
+        return loop;
+
+    loop.start = (juce::int64) std::llround(currentSnapshot->sustainLoop.start * sampleRate);
+    loop.end   = (juce::int64) std::llround(currentSnapshot->sustainLoop.end   * sampleRate);
+    loop.crossfade = std::min((juce::int64) std::llround(kLoopCrossfadeSec * sampleRate),
+                              (loop.end - loop.start) / 2);
+
+    // A loop too short to crossfade at all is treated as no loop rather than wrapped hard.
+    if (loop.crossfade < 1)
+        return {};
+
+    return loop;
+}
+
+// Within the last `crossfade` samples before a committed wrap, each value is blended toward where
+// the wrap will land - the same distance past the loop start - so that by the jump itself the
+// envelope is already reading the loop start's values and nothing steps.
+void SubVoice::currentEnvelope(double& amp, double& pitch) const
+{
+    const double t = envTime();
+    amp   = ampAt(t);
+    pitch = pitchAt(t);
+
+    if (! wrapCommitted)
+        return;
+
+    const auto loop = loopSamples();
+    if (loop.end <= loop.start)
+        return; // the loop was edited away mid-wrap; play on unblended
+
+    const double into = (double) (envSamples - (loop.end - loop.crossfade)) / (double) loop.crossfade;
+    if (into < 0.0)
+        return;
+
+    const double landing = (double) (envSamples - (loop.end - loop.start)) / sampleRate;
+    const double blend = std::min(into, 1.0);
+
+    amp   += (ampAt(landing)   - amp)   * blend;
+    pitch += (pitchAt(landing) - pitch) * blend;
 }
 
 // Advance the voice by exactly one sample and return the mono output.
@@ -71,13 +133,20 @@ float SubVoice::processSample()
 
         // Fade complete — start the pending note on the next processSample call.
         if (chokeTimer >= kChokeFadeSec)
-            startBody(pendingNote);
+            startBody(pendingNote, pendingHeld);
     }
     else // Playing
     {
-        const double t = envTime();
-        double amp   = ampAt(t);
-        double pitch = pitchAt(t);
+        const auto loop = loopSamples();
+        const bool canLoop = sustainOn && held && loop.end > loop.start;
+
+        // A held note entering the crossfade zone commits to this pass's wrap (see wrapCommitted).
+        if (canLoop && ! wrapCommitted
+            && envSamples >= loop.end - loop.crossfade && envSamples < loop.end)
+            wrapCommitted = true;
+
+        double amp, pitch;
+        currentEnvelope(amp, pitch);
 
         output = (float)(std::sin(phase) * amp);
 
@@ -87,14 +156,24 @@ float SubVoice::processSample()
 
         ++envSamples;
 
+        // The phase accumulator carries straight on across the jump, so the waveform stays
+        // continuous; only the envelope position moves.
+        if (wrapCommitted && envSamples >= loop.end)
+        {
+            envSamples -= loop.end - loop.start;
+            wrapCommitted = false;
+        }
+
         if (amp >= kIdleThreshold)
             hasExceededIdleThreshold = true;
 
         // Transition to Idle once the tail has decayed to inaudible levels.
         // hasExceededIdleThreshold guards against an envelope that starts at
         // (or near) zero from satisfying the threshold and killing the voice
-        // before it's ever actually sounded.
-        if (hasExceededIdleThreshold && amp < kIdleThreshold)
+        // before it's ever actually sounded. Never while a held note is still
+        // looping: a quiet stretch inside the loop is not the end of the tail.
+        const bool stillLooping = canLoop && envSamples <= loop.end;
+        if (hasExceededIdleThreshold && amp < kIdleThreshold && ! stillLooping)
             state = State::Idle;
     }
 
@@ -154,10 +233,14 @@ double SubVoice::lookupTable(const std::vector<float>& table, double t) const
 // Reset the oscillator, envelope clock, and idle-threshold flag, latch this note's tuning, then
 // enter Playing state. Phase is set to 0 so sin(0)=0; combined with an envelope whose amp starts
 // near zero, this gives a smooth (click-free) start even if the caller skips the choke.
-void SubVoice::startBody(int midiNote)
+void SubVoice::startBody(int midiNote, bool keyHeld)
 {
     semitoneShift = (double) (midiNote - pendingKeyRoot);
     tuneRatio     = std::exp2((double) pendingTuneCents / 1200.0);
+    sustainOn     = pendingSustain;
+    currentNote   = midiNote;
+    held          = keyHeld;
+    wrapCommitted = false;
 
     phase      = 0.0;
     envSamples = 0;

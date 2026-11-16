@@ -42,6 +42,17 @@ public:
         pendingTuneCents = masterTuneCents;
     }
 
+    // Sustain mode for the next note (§3.5): while the key is held, loop the envelopes between the
+    // first and last keytracked nodes, then finish the tail once it is released. Does nothing for a
+    // patch with fewer than two keytracked nodes. Latched at note-on, like setTuning.
+    void setSustain(bool enabled) { pendingSustain = enabled; }
+
+    // Release a note. Only the note now sounding, or the one queued behind a choke, is released: a
+    // note-off for an older key that has already been choked away is ignored, so in monophonic
+    // playing, letting go of the previous key never cuts the new note short. Without sustain mode
+    // this changes nothing - the envelope plays to its end whether or not the key is held.
+    void noteOff(int midiNote);
+
     // Trigger a new note.  If the voice is already playing, initiates the choke
     // fade and queues midiNote to start after the fade completes. The note's
     // distance from the key root drives the keytracked nodes (see setTuning).
@@ -79,9 +90,36 @@ private:
     // Sine oscillator: phase accumulator in [0, 2π).
     double phase = 0.0;
 
-    // Samples elapsed in the current Playing body; envelope time is derived from it rather than
-    // accumulated, since summing 1/sampleRate drifts (the same fix ClickVoice needed for its decay).
+    // The envelope read position in samples. Advances one per sample and jumps back by the loop
+    // length at a sustain wrap. Envelope time is derived from it rather than accumulated, since
+    // summing 1/sampleRate drifts (the same fix ClickVoice needed for its decay).
     juce::int64 envSamples = 0;
+
+    // ── Sustain (Phase 6) ─────────────────────────────────────────────────────
+    bool pendingSustain = false; // applied at the next startBody
+    bool sustainOn      = false; // latched for the note now playing
+    int  currentNote    = -1;    // the note now playing, for matching its note-off
+    bool held           = false; // its key is still down
+    bool pendingHeld    = false; // the key queued behind a choke is still down
+
+    // True once a held note has entered the crossfade at the end of the loop. The wrap is then
+    // carried through even if the key is released mid-crossfade: abandoning it halfway would step
+    // the envelope back from the blend to the raw value, which is the click the blend exists to
+    // prevent. Release then plays on from the loop start, through the loop end, into the tail.
+    bool wrapCommitted = false;
+
+    // Length of the crossfade into each wrap. Long enough that a loop whose ends differ in level
+    // does not click, short against any loop worth holding; capped at half the loop so a very short
+    // loop still has a stretch that plays unblended.
+    static constexpr double kLoopCrossfadeSec = 0.010;
+
+    // The loop in samples at the current sample rate, or end <= start when there is none.
+    struct LoopSamples { juce::int64 start = 0, end = 0, crossfade = 0; };
+    LoopSamples loopSamples() const;
+
+    // Amp and pitch at the current envelope position, blended toward the loop start while a
+    // committed wrap is under way.
+    void currentEnvelope(double& amp, double& pitch) const;
 
     // Envelope time for the sample about to be rendered, in seconds.
     double envTime() const { return (double) envSamples / sampleRate; }
@@ -115,7 +153,7 @@ private:
 
     // Resets phase, the envelope clock and the idle-threshold flag, latches the tuning for
     // midiNote, enters Playing state.
-    void startBody(int midiNote);
+    void startBody(int midiNote, bool keyHeld);
 
     // The frequency the oscillator plays at time t (seconds): the drawn pitch envelope, with the
     // keytracked share of the note's offset from the key root and the master tuning applied.

@@ -91,6 +91,9 @@ DOOFAudioProcessor::DOOFAudioProcessor()
         cached.clickTone  = apvts.getRawParameterValue(ParamIDs::layerClickTone(i));
         cached.clickDecay = apvts.getRawParameterValue(ParamIDs::layerClickDecay(i));
 
+        cached.subSustain = apvts.getRawParameterValue(ParamIDs::layerSubSustain(i));
+        jassert(cached.subSustain != nullptr);
+
         // A null here means an ID in ParamIDs disagrees with the one
         // createParameterLayout() registered — the mixer would then silently
         // read nothing for that control.
@@ -274,6 +277,14 @@ DOOFAudioProcessor::createParameterLayout()
             clickDecayRange(),
             ParamIDs::clickDecayDefaultSeconds
         ));
+
+        // Sub controls (Phase 6). Off by default, which is exactly the behaviour before sustain
+        // existed: a note-off changes nothing.
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { ParamIDs::layerSubSustain(i), 1 },
+            "Layer " + layerNumber + " Sustain",
+            false
+        ));
     }
 
     return layout;
@@ -387,6 +398,7 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         // loads the atomic pointer once per block, never per-sample).
         layer.subVoice.setSnapshot(layer.publisher.getSnapshot());
         layer.subVoice.setTuning(keyRoot, tuneCents);
+        layer.subVoice.setSustain(layerParams[(size_t) i].subSustain->load() > 0.5f);
 
         // Click controls likewise: read once here, latched by ClickVoice at the next note-on.
         layerSource[(size_t) i] = configureLayerSource(i);
@@ -405,11 +417,13 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // How much of the block has been written so far; also the start of the next sub-range.
     int rendered = 0;
 
-    // Note-off is intentionally ignored: the amp envelope handles the voice decay.
+    // Note-ons trigger; note-offs matter only to a Sub layer in sustain mode, which loops while
+    // the key is held (Phase 6). Without sustain the amp envelope alone decides how long a kick
+    // lasts, so a note-off is passed on and then changes nothing.
     for (const auto metadata : midiMessages)
     {
         const auto msg = metadata.getMessage();
-        if (! msg.isNoteOn())
+        if (! msg.isNoteOn() && ! msg.isNoteOff())
             continue;
 
         // Clamped rather than trusted. MidiBuffer iterates in ascending sample position and the
@@ -426,10 +440,21 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         // between Sub and Click — part-way through a note then plays from the right point rather
         // than restarting, and triggering an unselected voice costs nothing since its output is
         // never read.
+        //
+        // Note-offs go to the sub voices only; a click has no held state to release. Both kinds
+        // land at their own sample, so releasing a sustained note is as sample-accurate as
+        // starting one.
         for (int i = 0; i < getNumLayers(); ++i)
         {
-            getLayer(i).subVoice.noteOn(msg.getNoteNumber());
-            getLayer(i).clickVoice.noteOn(msg.getNoteNumber());
+            if (msg.isNoteOn())
+            {
+                getLayer(i).subVoice.noteOn(msg.getNoteNumber());
+                getLayer(i).clickVoice.noteOn(msg.getNoteNumber());
+            }
+            else
+            {
+                getLayer(i).subVoice.noteOff(msg.getNoteNumber());
+            }
         }
     }
 

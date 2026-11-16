@@ -105,4 +105,26 @@ std::vector<float> buildKeytrackTable(const EnvelopeModel& model)
     return table;
 }
 
+LoopSpan sustainLoopSpan(const EnvelopeModel& pitchModel)
+{
+    LoopSpan span;
+
+    for (int i = 0; i < pitchModel.getNumNodes(); ++i)
+    {
+        const auto node = pitchModel.getNode(i);
+        if (! node.keytrack)
+            continue;
+
+        // Nodes are time-ordered, so the first flagged one sets the start and the last the end.
+        if (span.start < 0.0)
+            span.start = node.time;
+        span.end = node.time;
+    }
+
+    if (! span.isValid())
+        return {};
+
+    return span;
+}
+
 } // namespace EnvelopeEvaluator

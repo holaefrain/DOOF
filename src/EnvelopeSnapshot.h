@@ -16,8 +16,10 @@ struct EnvelopeSnapshot
     // keytrack may be left empty, meaning no node is keytracked - which is what every snapshot
     // built before Phase 6 meant, and what tests that only care about pitch and amp still pass.
     EnvelopeSnapshot(std::vector<float> pitch, std::vector<float> amp,
-                     std::vector<float> keytrack = {})
-        : pitchTable(std::move(pitch)), ampTable(std::move(amp)), keytrackTable(std::move(keytrack))
+                     std::vector<float> keytrack = {},
+                     EnvelopeEvaluator::LoopSpan loop = {})
+        : pitchTable(std::move(pitch)), ampTable(std::move(amp)), keytrackTable(std::move(keytrack)),
+          sustainLoop(loop)
     {
         jassert(keytrackTable.empty() || keytrackTable.size() == pitchTable.size());
     }
@@ -28,6 +30,10 @@ struct EnvelopeSnapshot
     // Phase 6 §3.5: how much of the played note's offset from the key root applies at each point
     // of the pitch table, in [0, 1] (EnvelopeEvaluator::buildKeytrackTable). Empty = all zeros.
     const std::vector<float> keytrackTable;
+
+    // Phase 6 §3.5: the stretch sustain mode loops over while a note is held - first to last
+    // keytracked node. Invalid (the default) when fewer than two nodes are flagged.
+    const EnvelopeEvaluator::LoopSpan sustainLoop;
 
     // Both tables share this domain/resolution (EnvelopeEvaluator::kTableSize /
     // kTableDomainSeconds at construction time). Stored here so audio-thread
