@@ -3,6 +3,7 @@
 #include "ClickVoice.h"
 #include "SubVoice.h"
 #include "PitchSnap.h"
+#include "FXModuleInfo.h"
 
 // ParamIDs — the stable APVTS parameter ID strings, in one place.
 //
@@ -129,4 +130,37 @@ namespace ParamIDs
     static constexpr float subHarmDecayMinSeconds     = 0.005f;
     static constexpr float subHarmDecayMaxSeconds     = 2.0f;
     static constexpr float subHarmDecayDefaultSeconds = 0.15f;
+
+    // ── FX (Phase 7, §3.7, §7.1) ─────────────────────────────────────────────
+
+    // Where a layer's signal goes: choice indices are FX::Route, entries FX::routeChoices().
+    inline juce::String layerRoute (int layerIndex) { return "layer" + juce::String(layerIndex + 1) + ".route"; }
+
+    // Global oversampling for the nonlinear modules; the choice index is the power of two.
+    static const juce::String fxOversampling = "fx.oversampling";
+
+    // Each insert's output level, after its chain - what balances a layer routed to Both.
+    inline juce::String fxInsertLevel (int insertIndex) { return insertIndex == 0 ? "fx.insertA.level" : "fx.insertB.level"; }
+
+    // The four FX macros (§3.7).
+    inline juce::String fxMacro (int macroIndex) { return "fx.macro" + juce::String(macroIndex + 1); }
+
+    // A slot's parameters: "fx.insertA.slot1.type", ".on", ".mix", ".p1"-".p6". slot is the
+    // zero-based index across all three channels (FX::slotIndex); the ID names the channel and the
+    // one-based slot within it, as the FX page shows them.
+    inline juce::String fxSlotPrefix (int slot)
+    {
+        static const char* const channelKeys[] { "insertA", "insertB", "master" };
+        return juce::String("fx.") + channelKeys[(int) FX::channelOf(slot)] + ".slot" + juce::String(FX::slotInChannel(slot) + 1);
+    }
+    inline juce::String fxSlotType  (int slot)                 { return fxSlotPrefix(slot) + ".type"; }
+    inline juce::String fxSlotOn    (int slot)                 { return fxSlotPrefix(slot) + ".on"; }
+    inline juce::String fxSlotMix   (int slot)                 { return fxSlotPrefix(slot) + ".mix"; }
+    inline juce::String fxSlotParam (int slot, int paramIndex) { return fxSlotPrefix(slot) + ".p" + juce::String(paramIndex + 1); }
+
+    // Host-facing names: "Insert A 1 Type", "Master 6 P3".
+    inline juce::String fxSlotName (int slot)
+    {
+        return FX::channelName(FX::channelOf(slot)) + " " + juce::String(FX::slotInChannel(slot) + 1);
+    }
 }

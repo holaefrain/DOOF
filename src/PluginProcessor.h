@@ -4,6 +4,8 @@
 #include "ClickSampleLibrary.h"
 #include "LayerAudibility.h"
 #include "LayerViewPrefs.h"
+#include "FXEngine.h"
+#include "MacroAssignments.h"
 #include <array>
 #include <memory>
 
@@ -13,9 +15,12 @@
 // serialisation live here or in classes it owns.  The editor is a separate
 // object that attaches and detaches independently.
 //
-// Phase 1 signal path (mono, then copied to L/R):
-//   MIDI note-on → SubVoice (sine + hardcoded pitch/amp envelopes) → gain → DC blocker → out
-class DOOFAudioProcessor : public juce::AudioProcessor
+// Signal path (Phase 7, §7.1):
+//   MIDI → five layers (mono) → each summed into its route's bus (Dry / Insert A / Insert B / both)
+//        → FXEngine: inserts (stereo from here on), route alignment, Master FX
+//        → master gain → DC blocker → out
+class DOOFAudioProcessor : public juce::AudioProcessor,
+                           private juce::Timer
 {
 public:
     DOOFAudioProcessor();
@@ -46,7 +51,9 @@ public:
     bool acceptsMidi() const override { return true; }   // MIDI notes trigger the engine
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; } // updated when reverb added (Phase 7)
+    // The longest FX tail the current slots can produce (reverb decay, delay repeats), kept current
+    // by the FX poll below. Zero with no delay or reverb in any slot.
+    double getTailLengthSeconds() const override { return fxTailSeconds.load(std::memory_order_relaxed); }
 
     // ── Program/preset stubs (full browser added in Phase 11) ───────────────
     int getNumPrograms() override { return 1; }
@@ -89,6 +96,28 @@ public:
     ClickSampleLibrary&       getClickSamples()       { return clickSamples; }
     const ClickSampleLibrary& getClickSamples() const { return clickSamples; }
 
+    // ── FX (Phase 7) ─────────────────────────────────────────────────────────
+
+    // The FX section. Read by the FX page (effective values for its macro display) and by tests.
+    const FXEngine& getFXEngine() const { return fx; }
+
+    // The four macros' assignments - structured state the FX page edits directly. Message thread.
+    MacroAssignments& getMacroAssignments() { return macroAssignments; }
+
+    // Message thread: brings the FX engine's modules in line with the slot type and oversampling
+    // parameters, and the reported latency and tail with the result. Runs on a ~30 Hz poll, since
+    // the types can change by host automation as well as by the GUI; tests call it directly.
+    void updateFXModules();
+
+    // Message thread: puts a module in a slot the way the FX page does - the type, switched on,
+    // with that module's own defaults for its six controls and its mix - each as a host gesture.
+    // The slot's macro assignments are cleared: they addressed the outgoing module's controls.
+    void setFXSlotModule(int slot, FX::ModuleType type);
+
+    // Message thread: swaps everything about two slots - type, on, mix, the six controls and the
+    // macro assignments (user decision 2026-11-17: settings and assignments travel with the module).
+    void swapFXSlots(int slotA, int slotB);
+
 private:
     // Builds the parameter layout passed to the APVTS constructor.
     // Parameter IDs follow the stable namespaced format defined in §2 of project-reference.md.
@@ -102,11 +131,21 @@ private:
     // Likewise for every layer's sub.harmDecay.
     static juce::NormalisableRange<float> harmDecayRange();
 
-    // Renders and mixes one contiguous span of the current block: every layer's voice ticked and
-    // summed through its smoothed gain, then master gain and the DC blocker, written to L+R.
-    // processBlock calls this once per gap between MIDI events, which is what makes note-on
-    // dispatch sample-accurate. A zero-length span is a valid no-op.
-    void renderRange(juce::AudioBuffer<float>& buffer, int startSample, int numSamples, float gain);
+    // Renders one contiguous span: every layer's voice ticked and its output, through its smoothed
+    // gain, added to its route's FX bus starting at busOffset. processBlock calls this once per gap
+    // between MIDI events, which is what makes note-on dispatch sample-accurate. A zero-length span
+    // is a valid no-op.
+    void renderLayers(int busOffset, int numSamples);
+
+    // After the FX: master gain, then the DC blocker, per channel.
+    void applyOutputStage(float* left, float* right, int numSamples, float gain);
+
+    // Reads every FX parameter for this block into fxParams. Audio thread: atomics only.
+    void readFXParams();
+
+    // The FX poll (updateFXModules).
+    void timerCallback() override;
+    static constexpr int kFXPollHz = 30;
 
     // Reads the curve-tagged ENVELOPE children of `parent` into layer `index`'s two models.
     // Shared by both load paths, which differ only in which tree the envelopes hang off.
@@ -177,6 +216,9 @@ private:
         std::atomic<float>* subHarmDecay  = nullptr;
         std::atomic<float>* subHarmPreset = nullptr;
         std::atomic<float>* subPhase      = nullptr;
+
+        // Phase 7: which FX bus the layer feeds.
+        std::atomic<float>* route = nullptr;
     };
 
     std::array<LayerParams, LayerAudibility::kNumLayers> layerParams;
@@ -184,6 +226,30 @@ private:
     std::atomic<float>* masterTuneParam = nullptr; // master.tune, cents (Phase 6)
     std::atomic<float>* keyRootParam    = nullptr; // master.keyRoot, MIDI note (Phase 6)
 
+    // Phase 7's FX parameters, cached for the same reason.
+    struct SlotParamPointers
+    {
+        std::atomic<float>* type = nullptr;
+        std::atomic<float>* on   = nullptr;
+        std::atomic<float>* mix  = nullptr;
+        std::array<std::atomic<float>*, FX::kNumSlotParams> values {};
+    };
+    std::array<SlotParamPointers, FX::kNumSlots> slotParams;
+    std::array<std::atomic<float>*, 2> insertLevelParams {};
+    std::array<std::atomic<float>*, FX::kNumMacros> macroParams {};
+    std::atomic<float>* oversamplingParam = nullptr;
+
+    // The FX section, the macros' assignments, and this block's FX parameters - a member so the
+    // audio thread never builds it on its stack.
+    FXEngine fx;
+    MacroAssignments macroAssignments;
+    FX::EngineParams fxParams;
+
+    // Kept current by updateFXModules, read by getTailLengthSeconds from any thread.
+    std::atomic<double> fxTailSeconds { 0.0 };
+
+    // Each layer's route for the current block, resolved once per block like layerSource.
+    std::array<FX::Route, LayerAudibility::kNumLayers> layerRoute {};
     // Which of a layer's two voices its output is taken from for the current block.
     //
     // `silent` is not the same as an Off layer. It means a Click layer pointed at one of the four
@@ -232,11 +298,12 @@ private:
     // long enough to avoid a click.
     static constexpr double kGainRampSeconds = 0.005;
 
-    // DC blocker state variables.
+    // DC blocker state variables, one pair per output channel.
     // Implements y[n] = x[n] - x[n-1] + R * y[n-1] — a one-pole high-pass (~10 Hz) that
-    // removes any DC offset introduced by the synthesis or FX chain.
-    float dcBlockerX = 0.0f; // previous input sample
-    float dcBlockerY = 0.0f; // previous output sample
+    // removes any DC offset introduced by the synthesis or FX chain. The very last stage, so DC an
+    // asymmetric distortion generates is removed too.
+    std::array<float, 2> dcBlockerX {}; // previous input sample
+    std::array<float, 2> dcBlockerY {}; // previous output sample
     float dcBlockerR = 0.0f; // coefficient, computed from sample rate in prepareToPlay
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DOOFAudioProcessor)

@@ -27,7 +27,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 4 | Layers + mixer | Complete | ✅ |
 | 5 | Click layers | Complete | ✅ |
 | 6 | Sub tuning + phase tools | Complete | ✅ |
-| 7 | FX suite + routing matrix | Not started | — |
+| 7 | FX suite + routing matrix | In progress | — |
 | 8 | EQ + spectral analyzer | Not started | — |
 | 9 | Master limiter + output | Not started | — |
 | 10 | Triggering | Not started | — |
@@ -49,6 +49,19 @@ Decisions made *during build* that supplement or override `project-reference.md 
   - **Pitch snap = nearest equal-tempered note**, measured in cents. Snapping works on drawn values at A4 = 440; master tuning is applied to the Sub's output, so snapped nodes play on the tuned grid without double tuning.
   - **Phase lock = smooth correction**: a Hann-shaped pitch bend over up to 100 ms before the lock node, solved exactly from the same per-sample arithmetic the voice will run. Rotation sets the phase at the lock node when there is one, else at the note start.
 - **2026-11-16 — Phase 6 decisions made in the build** (not put to the user, recorded so they can be revisited): master tuning moves every Sub node (±100 cents); tuning, key root, harmonics, sustain and phase are latched at note-on like the click controls; the sustain loop runs first-to-last keytracked node with a 10 ms crossfaded wrap, and a release inside the crossfade completes that wrap; the keytrack weight between a flagged and an unflagged node blends linearly in time; Snap to Note is a per-layer view preference like Log Scale; the editor grew to 800 x 700; state version 4.
+- **2026-11-17 — Phase 7 design decisions (user's choices from four options put to them; closes §7.1/§8's FX questions):**
+  - **6 module slots per FX channel** (Insert A, Insert B, Master: 18 slots). More can be added later without breaking presets; never fewer.
+  - **Free reordering by drag-to-swap**: dropping a module on any other slot (any channel) swaps the two, settings and macro assignments included.
+  - **Both compressor forms**: a full single Compressor module, and a Dual Compressor module (two stages in series in one slot, three controls each within the slot's six).
+  - **Routing "Both" = parallel at full level**: the layer feeds Insert A and Insert B unattenuated and their outputs sum into Master. Per-insert output levels (`fx.insertA.level`, `fx.insertB.level`) balance it. "Dry" skips the inserts but still passes through Master.
+- **2026-11-17 — Phase 7 decisions made in the build** (not put to the user, recorded so they can be revisited):
+  - The slot type list is fixed at 14 entries for good (a Choice's entry list is part of its range): None, Clip, Tube, Wave, Tape, Drive, Bit Crusher, Ring Mod, Filter, EQ, Compressor, Dual Comp, Delay, Reverb. §3.7's "EQ" is a 3-band slot EQ (two shelves and a bell = the slot's six controls); Phase 8's 4-band analyzer EQ is a separate thing.
+  - Every slot has `type`, `on`, `mix` and six generic `p1`-`p6` parameters (§7.1's fixed generic slot parameters). Each module maps them to its own controls and units; picking a module in the GUI loads that module's defaults, and host automation of `type` leaves the six values where they are.
+  - Oversampling is one global setting (`fx.oversampling`: Off / 2x / 4x / 8x) applied to the nonlinear modules (the five distortions and Ring Mod), using JUCE's linear-phase FIR half-band filters with integer latency. Linear-phase so every route can be delay-compensated exactly and stay phase-coherent with the others, which a kick's layers depend on.
+  - Latency is a function of slot types and the oversampling setting only - never of bypass or mix - so toggling a module on/off never moves the kick in time. Parallel routes are delay-aligned inside the engine; the total is reported to the host.
+  - Module objects are created on the message thread when a slot's type changes and handed to the audio thread lock-free, so an empty slot costs no memory (a 2 s delay line in all 18 slots would be ~55 MB at 192 kHz). A type change crossfades through the dry signal over 10 ms.
+  - Master gain (`sub.gain`) is applied after the Master FX, then the DC blocker, which moves to the very end of the chain so distortion-generated DC is removed too. With every slot empty and every layer Dry the output is bit-identical to Phase 6.
+  - Macros offset their targets: effective = base + depth x macro, clamped, with depth in -100%..+100% (§7.1's range + polarity in one value). Assignments are structured state saved with the preset (state version 5), not APVTS parameters.
 - **2026-11-16 — Universal (Intel + Apple Silicon) build deferred until the product is finished** (Phase 14 release prep). Until then DOOF is built for the development Mac only, which is Intel x86_64; add `-DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"` when the time comes.
 - **2026-11-16 — The company behind DOOF is 4Eternity.** `COMPANY_NAME` is `4Eternity` (the vendor hosts list DOOF under) and `BUNDLE_ID` is `com.4eternity.doof`. The manufacturer code stays `ECsy`: JUCE derives the VST3 class ID from the manufacturer and plugin codes, so changing either would orphan DOOF in every saved set, and hosts never display it. If it is ever to change to match the new name, it has to happen before DOOF is used in sets anyone cares about.
 

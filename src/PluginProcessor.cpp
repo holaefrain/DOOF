@@ -7,10 +7,12 @@
 // State-serialisation schema for getStateInformation/setStateInformation and the .doof file:
 //
 //   DOOFState { version }
-//     DOOF_State                                  <- apvts.copyState(), all 21 parameters
+//     DOOF_State                                  <- apvts.copyState(), every parameter
 //     LAYER { index, logScale, editingPitch, pitchSnap }  <- one per layer, five of them
 //       ENVELOPE { curve="pitch", ... }
 //       ENVELOPE { curve="amp",   ... }
+//     MACROS                                      <- the FX macros' assignments (version 5)
+//       ASSIGN { macro, slot, target, depth }
 //
 // Both envelopes are EnvelopeIDs::envelopeType ("ENVELOPE"), so curveProp distinguishes them.
 // Never rename any of these once a preset has shipped - same rule as APVTS parameter IDs (§2).
@@ -22,6 +24,9 @@
 //   4      - Phase 6: adds pitchSnap to each LAYER. Pitch NODEs may now carry keytrack/phaseLock,
 //            and the APVTS holds the Phase 6 parameters; all three default to the pre-Phase-6
 //            behaviour when absent, so reading a version 3 file needs no branch either.
+//   5      - Phase 7: adds MACROS. The FX parameters are in the APVTS and default to an empty FX
+//            section with every layer routed Dry, which is exactly how an older file sounded; a
+//            missing MACROS means no assignments. No branch again.
 //
 // Only the flat layout needs detecting explicitly, which absence of versionProp does. Reading a
 // version 2 file needs no branch of its own: the view preferences are read with defaults, and the
@@ -39,8 +44,53 @@ namespace PresetIDs
     static const juce::String pitchCurveTag = "pitch";
     static const juce::String ampCurveTag   = "amp";
 
-    // Bumped whenever the layout above changes shape; Phase 5 and Phase 7 will both need it again.
-    static constexpr int currentVersion = 4;
+    // Bumped whenever the layout above changes shape.
+    static constexpr int currentVersion = 5;
+}
+
+namespace
+{
+    // A slot's generic control p1-p6, whose meaning depends on the module in the slot (§7.1). It
+    // reads and parses its value in that module's terms - "2.50 kHz" for a filter's cutoff, "4.0:1"
+    // for a compressor's ratio - so a host's generic editor and its automation lanes show the real
+    // thing rather than a bare 0-1, and the FX page's knobs get the same text through their
+    // attachments. The stored value is the normalised position either way.
+    class FXSlotParameter final : public juce::AudioParameterFloat
+    {
+    public:
+        FXSlotParameter(const juce::String& id, const juce::String& parameterName,
+                        const juce::AudioParameterChoice& slotType, int paramIndex)
+            : juce::AudioParameterFloat(juce::ParameterID { id, 1 }, parameterName,
+                                        juce::NormalisableRange<float>(0.0f, 1.0f), 0.5f),
+              type(slotType), index(paramIndex)
+        {
+        }
+
+        juce::String getText(float normalised, int maximumLength) const override
+        {
+            const auto& spec = currentSpec();
+            const auto text = spec.isUsed() ? FX::toText(spec, normalised) : juce::String("-");
+            return maximumLength > 0 ? text.substring(0, maximumLength) : text;
+        }
+
+        float getValueForText(const juce::String& text) const override
+        {
+            const auto& spec = currentSpec();
+            return spec.isUsed() ? FX::fromText(spec, text) : juce::jlimit(0.0f, 1.0f, text.getFloatValue());
+        }
+
+    private:
+        const FX::ParamSpec& currentSpec() const
+        {
+            return FX::getInfo((FX::ModuleType) type.getIndex()).params[(size_t) index];
+        }
+
+        const juce::AudioParameterChoice& type;
+        const int index;
+    };
+
+    juce::String percentText(float value, int) { return juce::String(juce::roundToInt(value * 100.0f)) + "%"; }
+    float percentFromText(const juce::String& text) { return juce::jlimit(0.0f, 1.0f, text.trim().getFloatValue() / 100.0f); }
 }
 
 // Construct the processor, declare the bus layout, and initialise the APVTS.
@@ -113,7 +163,44 @@ DOOFAudioProcessor::DOOFAudioProcessor()
                  && cached.mute != nullptr && cached.solo != nullptr);
         jassert(cached.clickType != nullptr && cached.clickTone != nullptr
                  && cached.clickDecay != nullptr);
+
+        cached.route = apvts.getRawParameterValue(ParamIDs::layerRoute(i));
+        jassert(cached.route != nullptr);
     }
+
+    oversamplingParam = apvts.getRawParameterValue(ParamIDs::fxOversampling);
+    jassert(oversamplingParam != nullptr);
+
+    for (int i = 0; i < 2; ++i)
+    {
+        insertLevelParams[(size_t) i] = apvts.getRawParameterValue(ParamIDs::fxInsertLevel(i));
+        jassert(insertLevelParams[(size_t) i] != nullptr);
+    }
+
+    for (int m = 0; m < FX::kNumMacros; ++m)
+    {
+        macroParams[(size_t) m] = apvts.getRawParameterValue(ParamIDs::fxMacro(m));
+        jassert(macroParams[(size_t) m] != nullptr);
+    }
+
+    for (int slot = 0; slot < FX::kNumSlots; ++slot)
+    {
+        auto& cached = slotParams[(size_t) slot];
+        cached.type = apvts.getRawParameterValue(ParamIDs::fxSlotType(slot));
+        cached.on   = apvts.getRawParameterValue(ParamIDs::fxSlotOn(slot));
+        cached.mix  = apvts.getRawParameterValue(ParamIDs::fxSlotMix(slot));
+        jassert(cached.type != nullptr && cached.on != nullptr && cached.mix != nullptr);
+
+        for (int k = 0; k < FX::kNumSlotParams; ++k)
+        {
+            cached.values[(size_t) k] = apvts.getRawParameterValue(ParamIDs::fxSlotParam(slot, k));
+            jassert(cached.values[(size_t) k] != nullptr);
+        }
+    }
+
+    // Records the slots' types so prepareToPlay builds them; no module exists before a sample rate.
+    updateFXModules();
+    startTimerHz(kFXPollHz);
 }
 
 // Snapshot of one layer's mixer flags for the audibility rule. Off is compared
@@ -153,7 +240,10 @@ float DOOFAudioProcessor::getTargetGain(int index, bool anySoloed) const
     return layerParams[(size_t) index].level->load();
 }
 
-DOOFAudioProcessor::~DOOFAudioProcessor() = default;
+DOOFAudioProcessor::~DOOFAudioProcessor()
+{
+    stopTimer();
+}
 
 // Bounds-checked in debug; index must come from a loop over getNumLayers() or
 // a validated selection, never straight from untrusted state.
@@ -344,6 +434,83 @@ DOOFAudioProcessor::createParameterLayout()
         ));
     }
 
+    // FX (Phase 7, §7.1). Appended after everything that existed before, so no earlier parameter
+    // moves in a host's list. Every default leaves the sound exactly as it was before FX existed:
+    // each layer routed Dry, every slot empty, insert levels at unity, macros at zero.
+    for (int i = 0; i < LayerAudibility::kNumLayers; ++i)
+    {
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { ParamIDs::layerRoute(i), 1 },
+            "Layer " + juce::String(i + 1) + " Route",
+            FX::routeChoices(),
+            (int) FX::Route::dry
+        ));
+    }
+
+    // 2x by default: it removes most of the audible aliasing a distorted kick produces, for a
+    // latency of a few samples - and only once a nonlinear module is actually in a slot.
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { ParamIDs::fxOversampling, 1 },
+        "FX Oversampling",
+        FX::oversamplingChoices(),
+        1
+    ));
+
+    for (int i = 0; i < 2; ++i)
+    {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::fxInsertLevel(i), 1 },
+            i == 0 ? "Insert A Level" : "Insert B Level",
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            1.0f
+        ));
+    }
+
+    for (int m = 0; m < FX::kNumMacros; ++m)
+    {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::fxMacro(m), 1 },
+            "Macro " + juce::String(m + 1),
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            0.0f,
+            juce::AudioParameterFloatAttributes().withStringFromValueFunction(percentText)
+                                                 .withValueFromStringFunction(percentFromText)
+        ));
+    }
+
+    for (int slot = 0; slot < FX::kNumSlots; ++slot)
+    {
+        const auto name = ParamIDs::fxSlotName(slot);
+
+        auto type = std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { ParamIDs::fxSlotType(slot), 1 },
+            name + " Type",
+            FX::moduleTypeChoices(),
+            (int) FX::ModuleType::none
+        );
+        const auto& typeParam = *type; // outlives the controls below: the APVTS owns both
+        layout.add(std::move(type));
+
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { ParamIDs::fxSlotOn(slot), 1 },
+            name + " On",
+            true
+        ));
+
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { ParamIDs::fxSlotMix(slot), 1 },
+            name + " Mix",
+            juce::NormalisableRange<float>(0.0f, 1.0f),
+            1.0f,
+            juce::AudioParameterFloatAttributes().withStringFromValueFunction(percentText)
+                                                 .withValueFromStringFunction(percentFromText)
+        ));
+
+        for (int k = 0; k < FX::kNumSlotParams; ++k)
+            layout.add(std::make_unique<FXSlotParameter>(ParamIDs::fxSlotParam(slot, k),
+                                                         name + " P" + juce::String(k + 1), typeParam, k));
+    }
+
     return layout;
 }
 
@@ -369,7 +536,7 @@ juce::NormalisableRange<float> DOOFAudioProcessor::clickDecayRange()
 
 // Prepare the voice and DC blocker for the upcoming playback session.
 // The DC blocker coefficient is computed here so it adapts to any sample rate.
-void DOOFAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
+void DOOFAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     // Every layer's voice is prepared, including Off ones — a layer switched on
     // mid-session must be ready to sound without waiting for another
@@ -398,8 +565,19 @@ void DOOFAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*
     // R = 1 - 2π * fc / sr  where fc ≈ 10 Hz removes any synthesis DC offset.
     dcBlockerR = 1.0f - static_cast<float>(
         juce::MathConstants<double>::twoPi * 10.0 / sampleRate);
-    dcBlockerX = 0.0f;
-    dcBlockerY = 0.0f;
+    dcBlockerX.fill(0.0f);
+    dcBlockerY.fill(0.0f);
+
+    // The FX section at this rate. Audio is stopped, so the slots' modules are installed directly
+    // rather than crossfaded in, and the first block already sounds as the parameters say.
+    // processBlock renders in chunks of at most this size, so a host that exceeds the size it
+    // announced is still handled.
+    fx.prepare(sampleRate, juce::jmax(1, samplesPerBlock));
+    std::array<int, FX::kNumSlots> types {};
+    for (int slot = 0; slot < FX::kNumSlots; ++slot)
+        types[(size_t) slot] = (int) slotParams[(size_t) slot].type->load();
+    fx.setModuleTypes(types, (int) oversamplingParam->load(), true);
+    setLatencySamples(fx.getLatencySamples());
 }
 
 // Free any resources allocated in prepareToPlay.
@@ -445,6 +623,16 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 {
     juce::ScopedNoDenormals noDenormals;
 
+    const int numSamples = buffer.getNumSamples();
+    const int chunkSize  = fx.getMaxBlockSize();
+
+    // Before prepareToPlay there is nothing to render with; silence rather than a crash.
+    if (chunkSize <= 0)
+    {
+        buffer.clear();
+        return;
+    }
+
     // Step 1 — mixer state for this block.
     //
     // anySoloed is evaluated once across every layer before any individual
@@ -477,61 +665,119 @@ void DOOFAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 
         // Ramped, not assigned — see kGainRampSeconds.
         layerGain[(size_t) i].setTargetValue(getTargetGain(i, anySoloed));
+
+        layerRoute[(size_t) i] = (FX::Route) juce::jlimit(0, 3, (int) cached.route->load());
     }
 
-    // Step 2 — render the block, split at every MIDI event.
-    //
-    // The master gain is loaded once for the whole block rather than per sub-range, so splitting
-    // the loop can't change how often it is sampled.
+    readFXParams();
+
+    // The master gain is loaded once for the whole block rather than per chunk or sub-range, so
+    // splitting the loop can't change how often it is sampled.
     const float gain = masterGainParam->load();
-    const int numSamples = buffer.getNumSamples();
 
-    // How much of the block has been written so far; also the start of the next sub-range.
+    // Step 2 — render the block, split at every MIDI event, in chunks no longer than the FX
+    // buses. A chunk is the whole block unless the host sends more than it announced.
+    //
+    // `rendered` is the absolute position reached so far; also the start of the next sub-range.
     int rendered = 0;
+    auto event = midiMessages.cbegin();
+    const auto lastEvent = midiMessages.cend();
 
-    // Note-ons trigger; note-offs matter only to a Sub layer in sustain mode, which loops while
-    // the key is held (Phase 6). Without sustain the amp envelope alone decides how long a kick
-    // lasts, so a note-off is passed on and then changes nothing.
-    for (const auto metadata : midiMessages)
+    auto* left  = buffer.getWritePointer(0);
+    auto* right = buffer.getWritePointer(1);
+
+    for (int chunkStart = 0; chunkStart < numSamples; chunkStart += chunkSize)
     {
-        const auto msg = metadata.getMessage();
-        if (! msg.isNoteOn() && ! msg.isNoteOff())
-            continue;
+        const int chunkEnd = juce::jmin(numSamples, chunkStart + chunkSize);
+        const bool isLastChunk = (chunkEnd == numSamples);
+        fx.clearBuses(chunkEnd - chunkStart);
 
-        // Clamped rather than trusted. MidiBuffer iterates in ascending sample position and the
-        // host should keep events inside the block, but an out-of-range or out-of-order position
-        // would otherwise rewind the cursor and re-render samples already written — advancing the
-        // voices twice over the same span.
-        const int eventPos = juce::jlimit(rendered, numSamples, metadata.samplePosition);
-
-        renderRange(buffer, rendered, eventPos - rendered, gain);
-        rendered = eventPos;
-
-        // Note-ons go to both of every layer's voices, including Off ones and including whichever
-        // voice the layer's type is not currently selecting. A layer switched on — or switched
-        // between Sub and Click — part-way through a note then plays from the right point rather
-        // than restarting, and triggering an unselected voice costs nothing since its output is
-        // never read.
-        //
-        // Note-offs go to the sub voices only; a click has no held state to release. Both kinds
-        // land at their own sample, so releasing a sustained note is as sample-accurate as
-        // starting one.
-        for (int i = 0; i < getNumLayers(); ++i)
+        // Note-ons trigger; note-offs matter only to a Sub layer in sustain mode, which loops while
+        // the key is held (Phase 6). Without sustain the amp envelope alone decides how long a kick
+        // lasts, so a note-off is passed on and then changes nothing.
+        for (; event != lastEvent; ++event)
         {
-            if (msg.isNoteOn())
+            const auto metadata = *event;
+
+            // Clamped rather than trusted. MidiBuffer iterates in ascending sample position and the
+            // host should keep events inside the block, but an out-of-range or out-of-order position
+            // would otherwise rewind the cursor and re-render samples already written — advancing the
+            // voices twice over the same span.
+            const int eventPos = juce::jlimit(rendered, numSamples, metadata.samplePosition);
+
+            // An event at or past this chunk's end belongs to a later chunk - except in the last,
+            // which takes everything left, including events the host placed past the block's end.
+            if (eventPos >= chunkEnd && ! isLastChunk)
+                break;
+
+            const auto msg = metadata.getMessage();
+            if (! msg.isNoteOn() && ! msg.isNoteOff())
+                continue;
+
+            renderLayers(rendered - chunkStart, eventPos - rendered);
+            rendered = eventPos;
+
+            // Note-ons go to both of every layer's voices, including Off ones and including whichever
+            // voice the layer's type is not currently selecting. A layer switched on — or switched
+            // between Sub and Click — part-way through a note then plays from the right point rather
+            // than restarting, and triggering an unselected voice costs nothing since its output is
+            // never read.
+            //
+            // Note-offs go to the sub voices only; a click has no held state to release. Both kinds
+            // land at their own sample, so releasing a sustained note is as sample-accurate as
+            // starting one.
+            for (int i = 0; i < getNumLayers(); ++i)
             {
-                getLayer(i).subVoice.noteOn(msg.getNoteNumber());
-                getLayer(i).clickVoice.noteOn(msg.getNoteNumber());
-            }
-            else
-            {
-                getLayer(i).subVoice.noteOff(msg.getNoteNumber());
+                if (msg.isNoteOn())
+                {
+                    getLayer(i).subVoice.noteOn(msg.getNoteNumber());
+                    getLayer(i).clickVoice.noteOn(msg.getNoteNumber());
+                }
+                else
+                {
+                    getLayer(i).subVoice.noteOff(msg.getNoteNumber());
+                }
             }
         }
+
+        // Everything after the chunk's last event — the whole chunk when there was none.
+        renderLayers(rendered - chunkStart, chunkEnd - rendered);
+        rendered = chunkEnd;
+
+        // Step 3 — the FX section, then the output stage.
+        const int chunkLength = chunkEnd - chunkStart;
+        fx.process(left + chunkStart, right + chunkStart, chunkLength, fxParams);
+        applyOutputStage(left + chunkStart, right + chunkStart, chunkLength, gain);
+    }
+}
+
+void DOOFAudioProcessor::readFXParams()
+{
+    for (int slot = 0; slot < FX::kNumSlots; ++slot)
+    {
+        const auto& cached = slotParams[(size_t) slot];
+        auto& params = fxParams.slots[(size_t) slot];
+
+        params.type = (int) cached.type->load();
+        params.on   = cached.on->load() > 0.5f;
+        params.mix  = cached.mix->load();
+        for (int k = 0; k < FX::kNumSlotParams; ++k)
+            params.values[(size_t) k] = cached.values[(size_t) k]->load();
     }
 
-    // Everything after the last event — the whole block when there was no note-on at all.
-    renderRange(buffer, rendered, numSamples - rendered, gain);
+    for (int i = 0; i < 2; ++i)
+        fxParams.insertLevel[(size_t) i] = insertLevelParams[(size_t) i]->load();
+
+    for (int m = 0; m < FX::kNumMacros; ++m)
+        fxParams.macros[(size_t) m] = macroParams[(size_t) m]->load();
+
+    fxParams.macroSnapshot = macroAssignments.getSnapshot();
+
+    // The host's tempo, for synced delays. Kept at the last known value when a block has none.
+    if (auto* playHead = getPlayHead())
+        if (const auto position = playHead->getPosition())
+            if (const auto bpm = position->getBpm(); bpm.hasValue() && *bpm > 0.0)
+                fxParams.context.bpm = *bpm;
 }
 
 // Pushes one layer's click parameters into its ClickVoice and answers which voice the layer is
@@ -567,26 +813,30 @@ DOOFAudioProcessor::LayerSource DOOFAudioProcessor::configureLayerSource(int ind
     return layer.clickVoice.hasContentFor(slot) ? LayerSource::click : LayerSource::silent;
 }
 
-// Renders and mixes one contiguous span of the block, from startSample for numSamples. Called once
-// per gap between MIDI events, so a zero-length span (two events at the same position, or an event
-// at sample 0) is a legitimate no-op rather than an error.
+// Renders one contiguous span of the block into the FX buses, starting busOffset samples into
+// them. Called once per gap between MIDI events, so a zero-length span (two events at the same
+// position, or an event at sample 0) is a legitimate no-op rather than an error.
 //
 // Layers are summed straight, with no division by the number of active layers: normalising would
 // change the sound of every other layer whenever one was enabled. Five layers at unity can
 // therefore exceed full scale, which is expected — taming that is the Phase 9 master limiter's
 // job, and nothing here clamps or wraps.
 //
+// Each layer's sample is computed once and added to its route's bus - to both insert buses for
+// "Both" (parallel at full level, user decision 2026-11-17). A layer routed Dry is added to the dry
+// bus in exactly the order and arithmetic the pre-FX mix used, which is what keeps the default
+// patch bit-identical to Phase 6.
+//
 // Audio-thread only, and bound by the same real-time rules as processBlock itself.
-void DOOFAudioProcessor::renderRange(juce::AudioBuffer<float>& buffer, int startSample,
-                                     int numSamples, float gain)
+void DOOFAudioProcessor::renderLayers(int busOffset, int numSamples)
 {
-    jassert(startSample >= 0 && numSamples >= 0
-             && startSample + numSamples <= buffer.getNumSamples());
+    jassert(busOffset >= 0 && numSamples >= 0 && busOffset + numSamples <= fx.getMaxBlockSize());
 
-    auto* leftCh  = buffer.getWritePointer(0);
-    auto* rightCh = buffer.getWritePointer(1);
+    float* dryBus = fx.getBus(FX::Bus::dry);
+    float* busA   = fx.getBus(FX::Bus::insertA);
+    float* busB   = fx.getBus(FX::Bus::insertB);
 
-    for (int i = startSample; i < startSample + numSamples; ++i)
+    for (int i = busOffset; i < busOffset + numSamples; ++i)
     {
         // Every layer is ticked every sample, even silent ones, and never
         // skipped. Skipping would freeze that layer's envelope time, so
@@ -599,7 +849,6 @@ void DOOFAudioProcessor::renderRange(juce::AudioBuffer<float>& buffer, int start
         // the type selects is mixed. Ticking just the selected voice would freeze the other's
         // internal time, so switching a layer between Sub and Click mid-note would resume the
         // newly-selected voice from wherever the last switch left it.
-        float mixed = 0.0f;
         for (int layerIndex = 0; layerIndex < getNumLayers(); ++layerIndex)
         {
             auto& layer = getLayer(layerIndex);
@@ -615,19 +864,37 @@ void DOOFAudioProcessor::renderRange(juce::AudioBuffer<float>& buffer, int start
                 case LayerSource::silent:                   break;
             }
 
-            mixed += selected * layerGain[(size_t) layerIndex].getNextValue();
+            const float contribution = selected * layerGain[(size_t) layerIndex].getNextValue();
+
+            switch (layerRoute[(size_t) layerIndex])
+            {
+                case FX::Route::dry:     dryBus[i] += contribution; break;
+                case FX::Route::insertA: busA[i]   += contribution; break;
+                case FX::Route::insertB: busB[i]   += contribution; break;
+                case FX::Route::both:    busA[i]   += contribution;
+                                         busB[i]   += contribution; break;
+            }
         }
+    }
+}
 
-        float sample = mixed * gain;
+// Master gain, then the DC blocker, per channel. The blocker is last of all so that DC from an
+// asymmetric distortion anywhere in the FX is removed with the synthesis's own.
+void DOOFAudioProcessor::applyOutputStage(float* left, float* right, int numSamples, float gain)
+{
+    float* channels[] { left, right };
 
-        // Apply DC blocker to remove any slowly-drifting offset from the synthesis.
-        float blocked = sample - dcBlockerX + dcBlockerR * dcBlockerY;
-        dcBlockerX = sample;
-        dcBlockerY = blocked;
-
-        // Mono kick output copied to both channels; stereo is introduced in Phase 7 FX.
-        leftCh[i]  = blocked;
-        rightCh[i] = blocked;
+    for (size_t ch = 0; ch < 2; ++ch)
+    {
+        float* data = channels[ch];
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float sample = data[i] * gain;
+            const float blocked = sample - dcBlockerX[ch] + dcBlockerR * dcBlockerY[ch];
+            dcBlockerX[ch] = sample;
+            dcBlockerY[ch] = blocked;
+            data[i] = blocked;
+        }
     }
 }
 
@@ -676,6 +943,8 @@ void DOOFAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 
         root.addChild(layerNode, -1, nullptr);
     }
+
+    root.addChild(macroAssignments.getState(), -1, nullptr);
 
     std::unique_ptr<juce::XmlElement> xml(root.createXml());
     copyXmlToBinary(*xml, destData);
@@ -742,9 +1011,18 @@ void DOOFAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
         layerViewPrefs.fill(LayerViewPrefs{});
     }
 
+    // A file older than version 5 has no MACROS, which reads as an invalid tree and clears every
+    // assignment - correct, since it had none.
+    macroAssignments.setState(root.getChildWithName(MacroAssignments::stateType));
+
     // A loaded preset is not a user edit to undo back from, and the re-seeding above would
     // otherwise leave its own transactions sitting at the top of the history.
     envelopeUndoManager.clearUndoHistory();
+
+    // The slot types may have changed. Built now when this is the message thread; otherwise the
+    // FX poll does it within a frame.
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        updateFXModules();
 }
 
 // Reads the curve-tagged ENVELOPE children of `parent` into one layer's models. Shared by both
@@ -774,6 +1052,101 @@ void DOOFAudioProcessor::seedLayerWithDefaults(int index)
 
     DefaultEnvelopes::seedPitch(layer.pitchModel);
     DefaultEnvelopes::seedAmp(layer.ampModel);
+}
+
+// ── FX (Phase 7) ─────────────────────────────────────────────────────────────
+
+void DOOFAudioProcessor::timerCallback()
+{
+    updateFXModules();
+}
+
+void DOOFAudioProcessor::updateFXModules()
+{
+    jassert(juce::MessageManager::existsAndIsCurrentThread());
+
+    std::array<int, FX::kNumSlots> types {};
+    for (int slot = 0; slot < FX::kNumSlots; ++slot)
+        types[(size_t) slot] = (int) slotParams[(size_t) slot].type->load();
+
+    fx.setModuleTypes(types, (int) oversamplingParam->load(), false);
+
+    // The engine's latency changes once the audio thread has actually swapped a module in, which
+    // is a block or so after the offer above - so this catches up on the following poll.
+    if (const int latency = fx.getLatencySamples(); latency != getLatencySamples())
+        setLatencySamples(latency);
+
+    // Tail: the longer insert's, plus Master's, since the master chain hears both.
+    double channelTail[FX::kNumChannels] {};
+    for (int slot = 0; slot < FX::kNumSlots; ++slot)
+    {
+        FX::SlotValues values {};
+        for (int k = 0; k < FX::kNumSlotParams; ++k)
+            values[(size_t) k] = slotParams[(size_t) slot].values[(size_t) k]->load();
+
+        channelTail[(int) FX::channelOf(slot)] += FX::tailSeconds((FX::ModuleType) types[(size_t) slot], values,
+                                                                  fxParams.context.bpm);
+    }
+
+    fxTailSeconds.store(juce::jmax(channelTail[0], channelTail[1]) + channelTail[2], std::memory_order_relaxed);
+}
+
+void DOOFAudioProcessor::setFXSlotModule(int slot, FX::ModuleType type)
+{
+    jassert(juce::isPositiveAndBelow(slot, FX::kNumSlots));
+
+    auto set = [this](const juce::String& id, float realValue)
+    {
+        if (auto* param = apvts.getParameter(id))
+        {
+            param->beginChangeGesture();
+            param->setValueNotifyingHost(param->convertTo0to1(realValue));
+            param->endChangeGesture();
+        }
+    };
+
+    const auto& info = FX::getInfo(type);
+
+    // The new module is only built by updateFXModules below, once every control is in place, so it
+    // never runs a block against the outgoing module's settings.
+    set(ParamIDs::fxSlotOn(slot), 1.0f);
+    set(ParamIDs::fxSlotMix(slot), info.defaultMix);
+    for (int k = 0; k < FX::kNumSlotParams; ++k)
+        set(ParamIDs::fxSlotParam(slot, k), FX::defaultNormalised(info.params[(size_t) k]));
+    set(ParamIDs::fxSlotType(slot), (float) (int) type);
+
+    macroAssignments.clearSlot(slot);
+    updateFXModules();
+}
+
+void DOOFAudioProcessor::swapFXSlots(int slotA, int slotB)
+{
+    if (slotA == slotB || ! juce::isPositiveAndBelow(slotA, FX::kNumSlots) || ! juce::isPositiveAndBelow(slotB, FX::kNumSlots))
+        return;
+
+    juce::StringArray suffixes { ".type", ".on", ".mix" };
+    for (int k = 0; k < FX::kNumSlotParams; ++k)
+        suffixes.add(".p" + juce::String(k + 1));
+
+    for (const auto& suffix : suffixes)
+    {
+        auto* a = apvts.getParameter(ParamIDs::fxSlotPrefix(slotA) + suffix);
+        auto* b = apvts.getParameter(ParamIDs::fxSlotPrefix(slotB) + suffix);
+        jassert(a != nullptr && b != nullptr);
+
+        const float valueA = a->getValue();
+        const float valueB = b->getValue();
+
+        for (auto [param, value] : { std::pair { a, valueB }, std::pair { b, valueA } })
+        {
+            param->beginChangeGesture();
+            param->setValueNotifyingHost(value);
+            param->endChangeGesture();
+        }
+    }
+
+    macroAssignments.swapSlots(slotA, slotB);
+    updateFXModules();
 }
 
 // Entry point called by the host to create a new plugin instance.

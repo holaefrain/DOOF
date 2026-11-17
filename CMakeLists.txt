@@ -107,6 +107,14 @@ target_sources(DOOF
         src/LayerStrip.cpp        # one cell of the horizontal layer selector (§4.3)
         src/ClickPanel.cpp        # contextual panel for a Click layer: type, tone, decay, level
         src/SubPanel.cpp          # Sub layer strip under the canvas: harmonics, sustain, phase
+        src/FXModuleInfo.cpp      # the FX module catalogue: controls, units, ranges, text (Phase 7)
+        src/FXModule.cpp          # module factory + the empty-slot passthrough
+        src/FXDistortion.cpp      # Clip, Tube, Wave, Tape, Drive, Ring Mod (oversampled)
+        src/FXFilters.cpp         # Filter, EQ, Bit Crusher
+        src/FXDynamics.cpp        # Compressor, Dual Comp
+        src/FXTime.cpp            # Delay, Reverb
+        src/FXEngine.cpp          # slots, inserts, route alignment, master (§7.1)
+        src/MacroAssignments.cpp  # the four macros' assignments + their audio-thread snapshot
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -155,6 +163,15 @@ target_sources(DOOFTests
         src/EnvelopePublisher.cpp # atomic-pointer publish path under test
         src/DefaultEnvelopes.cpp # out-of-the-box envelope shapes, shared with production
         src/LayerAudibility.cpp  # §3.3 audibility rule under test (no JUCE dependency at all)
+        tests/FXTests.cpp        # Phase 7: every FX module, the slot, the engine, the macros
+        src/FXModuleInfo.cpp
+        src/FXModule.cpp
+        src/FXDistortion.cpp
+        src/FXFilters.cpp
+        src/FXDynamics.cpp
+        src/FXTime.cpp
+        src/FXEngine.cpp
+        src/MacroAssignments.cpp
 )
 
 # Expose the src/ directory so tests can #include "SubVoice.h" without path prefixes.
@@ -169,12 +186,15 @@ target_compile_definitions(DOOFTests
 # SubVoice uses juce::MathConstants and juce::ignoreUnused, both from juce_core.
 # EnvelopeModel uses juce::ValueTree/UndoManager, from juce_data_structures.
 # EnvelopePublisher uses juce::Timer, from juce_events.
-# Add juce_audio_basics or juce_dsp here when later test phases need them.
+# The FX modules (Phase 7) use juce_dsp's oversampling and juce_audio_basics' SmoothedValue - still
+# no GUI and no processor, so this target stays quick to build and run.
 target_link_libraries(DOOFTests
     PRIVATE
         juce::juce_core
         juce::juce_data_structures
         juce::juce_events
+        juce::juce_audio_basics
+        juce::juce_dsp
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
@@ -206,6 +226,14 @@ target_sources(DOOFIntegrationTests
         src/LayerStrip.cpp
         src/ClickPanel.cpp
         src/SubPanel.cpp
+        src/FXModuleInfo.cpp
+        src/FXModule.cpp
+        src/FXDistortion.cpp
+        src/FXFilters.cpp
+        src/FXDynamics.cpp
+        src/FXTime.cpp
+        src/FXEngine.cpp
+        src/MacroAssignments.cpp
 )
 
 target_include_directories(DOOFIntegrationTests PRIVATE src)

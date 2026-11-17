@@ -142,7 +142,7 @@ private:
 
     void testAllExpectedParametersExist()
     {
-        beginTest("(a) All 68 expected parameter IDs exist, and nothing extra");
+        beginTest("(a) All 242 expected parameter IDs exist, and nothing extra");
 
         DOOFAudioProcessor processor;
 
@@ -171,8 +171,29 @@ private:
             expected.add("layer" + n + ".sub.phase");
         }
 
-        expectEquals(expected.size(), 68,
-                     "3 globals + 5 layers x (4 mixer + 3 click + 6 sub) controls");
+        // Phase 7: a route per layer, then the FX section - oversampling, two insert levels, four
+        // macros, and 18 slots of nine controls each, named by channel and one-based slot.
+        for (int i = 1; i <= kExpectedLayers; ++i)
+            expected.add("layer" + juce::String(i) + ".route");
+
+        expected.add("fx.oversampling");
+        expected.add("fx.insertA.level");
+        expected.add("fx.insertB.level");
+        for (int m = 1; m <= 4; ++m)
+            expected.add("fx.macro" + juce::String(m));
+
+        for (const auto* channel : { "insertA", "insertB", "master" })
+        {
+            for (int slot = 1; slot <= 6; ++slot)
+            {
+                const auto prefix = juce::String("fx.") + channel + ".slot" + juce::String(slot);
+                for (const auto* suffix : { ".type", ".on", ".mix", ".p1", ".p2", ".p3", ".p4", ".p5", ".p6" })
+                    expected.add(prefix + suffix);
+            }
+        }
+
+        expectEquals(expected.size(), 242,
+                     "3 globals + 5 layers x (4 mixer + 3 click + 6 sub + 1 route) + 7 FX globals + 18 slots x 9");
 
         for (const auto& id : expected)
             expect(processor.apvts.getParameter(id) != nullptr,
@@ -4590,3 +4611,4 @@ int main()
 
     return failures > 0 ? 1 : 0;
 }
+
