@@ -26,7 +26,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 3 | Envelope canvas (GUI) + minimal preset save/load | Complete | ✅ |
 | 4 | Layers + mixer | Complete | ✅ |
 | 5 | Click layers | Complete | ✅ |
-| 6 | Sub tuning + phase tools | Built — verify passed; your hands-on check pending | ✅ automated |
+| 6 | Sub tuning + phase tools | Complete | ✅ |
 | 7 | FX suite + routing matrix | Not started | — |
 | 8 | EQ + spectral analyzer | Not started | — |
 | 9 | Master limiter + output | Not started | — |
@@ -95,7 +95,7 @@ Decisions made *during build* that supplement or override `project-reference.md 
 
 Every new test was bite-tested (about 25 deliberate breaks across the eight steps, each failing the test aimed at it). 143 subtests across both binaries (72 + 71), 0 failures; all four targets build with zero compiler warnings.
 
-**Still outstanding:** your hands-on check of Phase 6 in Live (the §5 per-feature loop's "manual test in standalone, then a DAW"), then Phase 6 can be marked complete. The installed VST3 in `/Volumes/External SSD/Ableton/VST3 Plug-In` predates Phase 6 and needs reinstalling for that.
+**Hands-on check:** the Phase 6 Release build was installed in `/Volumes/External SSD/Ableton/VST3 Plug-In` (`894ed0d`) and checked in Live on 2026-11-17: it works. **Phase 6 marked complete on 2026-11-17.**
 
 **Next steps:** Phase 7 — FX suite + routing matrix.
 
