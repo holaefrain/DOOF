@@ -27,7 +27,7 @@ Each session gets an entry. Reference this alongside `project-reference.md` to u
 | 4 | Layers + mixer | Complete | ✅ |
 | 5 | Click layers | Complete | ✅ |
 | 6 | Sub tuning + phase tools | Complete | ✅ |
-| 7 | FX suite + routing matrix | In progress | — |
+| 7 | FX suite + routing matrix | Built — verify passed; your hands-on check pending | ✅ automated |
 | 8 | EQ + spectral analyzer | Not started | — |
 | 9 | Master limiter + output | Not started | — |
 | 10 | Triggering | Not started | — |
@@ -75,6 +75,88 @@ Decisions made *during build* that supplement or override `project-reference.md 
 ---
 
 ## Sessions
+
+---
+
+### Session 2026-11-17 — Phase 7
+
+**Goal:** Phase 7 — FX suite + routing matrix (§3.7, §7.1).
+
+**Decisions put to the user** (four options; recorded in the decision log above): six slots per channel, drag-to-swap reordering, both compressor forms, "Both" = parallel at full level.
+
+**Built (one commit per step, tests included):**
+1. **The FX section** (`d0d9dd7`):
+   - `FXModuleInfo`: the catalogue of 13 modules and their six controls. Names, units, ranges, defaults and display text in one table, read by the DSP, the GUI and the host-facing parameter text alike.
+   - The modules, in four families (distortion, filters, dynamics, time).
+   - `FXSlot`: exact bypass, wet/dry mix, and a lock-free module handoff that crossfades.
+   - `FXEngine`: three buses, two inserts and Master, with route alignment and latency.
+   - `MacroAssignments`: a ValueTree model published as an atomic snapshot, like the envelopes.
+   - 174 new parameters (242 total). The slot controls report their text in the module's own terms ("2.00 kHz", "4.0:1"), so a host's generic editor shows real values.
+   - The processor renders layers into route buses, in chunks no longer than the size it prepared for, then runs FX, master gain and the DC blocker.
+   - Before touching the signal path, I captured a 192,000-sample stereo render of a busy five-layer patch (subs, clicks, harmonics, sustain, solo/mute, chokes and note-offs mid-block). The new engine matches it bit for bit, and kept matching through every later step. This was a temporary local guard, not committed: Phase7Processor and Phase7State pin the same behaviour permanently.
+2. **Processor-level tests** (`b7e455b`): routing, module picking and swapping, latency and tail reporting, oversized host blocks, state version 5, and a version 4 preset.
+3. **GUI** (`8604388`): page tabs (Edit · FX) with Save/Load moved into the tab row, and the FX page. Rendered to a PNG and checked by eye.
+4. **Verify** (`ed7b631`): §6's list end to end through the processor.
+5. **Docs**: this entry, the user guide's FX section, and §7.1/§8 marked decided.
+
+**Issues found and fixed along the way:**
+1. **Reverb decayed 10–15% short of its Decay setting** (0.90 s measured for 1.0 s, 2.54 s for 3.0 s). The cause was the fractional delay-line reads inside the feedback loop. Linear interpolation is a low-pass, and applied on every trip round the loop it costs about 3 dB of broadband energy per pass at a half-sample fraction. The line lengths are now whole samples, and the Delay time and Reverb pre-delay also settle on whole samples, so repeats don't dull. RT60 is now within 1% (0.505 / 0.994 / 2.996 s for 0.5 / 1 / 3 s). In the same change the input pattern was made orthogonal to both output taps, so the first pass arrives as eight reflections rather than one coherent burst on the left.
+2. **The insert levels faded in over 20 ms after every prepare.** Their smoothers started at 0. Caught by the engine tests; they now start at the parameter's value.
+3. **Measurement, not code, three times, each traced before any threshold moved:**
+   - The alias measurement bottomed out at −46 dB because of Hann-window leakage from the strong harmonics. A Blackman-Harris window shows the real figures, down to −87 dB.
+   - An impulse peak through an oversampled insert landed one sample early. JUCE trims its filters' latency to a whole sample with a fractional-delay all-pass, which is exact at low and mid frequencies but smears an impulse. Alignment is now measured as phase at 500 Hz, and agrees to 0.1°.
+   - The display-text round trip was tested tighter than the text's own precision.
+4. **A data race on the host tempo** between the audio thread and the FX poll (for the tail estimate). It is now an atomic.
+
+**Verify result (Phase 7 §6):**
+
+| §6 check | Result |
+|---|---|
+| Every module: bypass = bit-identical null test | ✅ All 13, through the processor: exact with oversampling off, and exactly one latency later (61 samples) at 4x |
+| Engaged = measured response matches spec | ✅ Each module against its spec in FXTests. Through the processor: the filter is −3.01 dB at its cutoff (12 and 24 dB), and every bit-crusher step is a whole multiple of the 3-bit grid |
+| Route only layer 2 to Insert A, solo it — only layer 2 processed | ✅ Matches layer 2 rendered alone and filtered offline, within 1e-5; unsoloed, layer 1 adds back in unprocessed |
+| Assign a macro to a cutoff and sweep — the cutoff tracks | ✅ At 1, 2 and 5 kHz the measured response matches the filter's exact digital response within 0.05 dB |
+| Oversampled vs non-oversampled distortion via FFT — less aliasing | ✅ Hard clip on a 3123 Hz tone through the processor: −14.1 dB of alias power off vs −32.3 dB at 4x |
+| Automate a param fast — no zipper noise | ✅ A module's output, an insert level and a macro on a mix, all flipped every 64 samples: no sample-to-sample jump beyond the tone's own slope |
+
+The per-module spec checks in FXTests:
+- **Filter:** LP/HP −3.01 dB at 200 Hz, 1 kHz and 5 kHz at both slopes; BP 0 dB at its peak; notch below −40 dB.
+- **EQ:** bell +6.0 dB at its frequency; each shelf half its gain at its corner; flat = identity.
+- **Bit crusher:** every sample exactly on the grid; Rate holds samples.
+- **Clip:** never exceeds the ceiling; small-signal gain = drive.
+- **Tube:** H2 below −80 dB unbiased, present biased.
+- **Wave:** bounded at any drive; harmonics rise with fold.
+- **Tape:** bump +6 dB at 80 Hz; tone −3 dB at its frequency.
+- **Drive:** 40 Hz under the crossover stays clean (H3 < −40 dB); 2 kHz above it is driven.
+- **Ring Mod:** the sidebands at 0.25 each; the carrier-free input below 1e-4.
+- **Compressor:** static curve within 0.01 dB (hard knee, soft knee, makeup); 63% of the reduction after one attack time.
+- **Dual Comp:** the two stages' curves in series.
+- **Delay:** the echo exactly on its sample; the repeat at the feedback level; 1/8 at 120 BPM lands at 11025; ping-pong alternates.
+- **Reverb:** RT60 within 3% (measured within 1%); width 0 exactly mono.
+
+Alias power per distortion, Off / 2x / 4x:
+
+| Module | Off | 2x | 4x |
+|---|---|---|---|
+| Clip | −15.0 | −24.3 | −45.8 |
+| Tube | −19.1 | −36.3 | −70.1 |
+| Wave | −22.9 | −87.1 | −87.2 |
+| Tape | −27.7 | −50.9 | −83.3 |
+| Drive | −16.4 | −27.7 | −47.8 |
+
+All figures in dB. Oversampling latency per module at 44.1 kHz: 2x 49, 4x 61, 8x 65 samples.
+
+About 37 deliberate breaks across the steps each failed the test aimed at it. 201 subtests across both binaries (110 + 91), 0 failures. All four targets build with zero compiler warnings.
+
+**Still outstanding:** your hands-on check of Phase 7 in Live, then Phase 7 can be marked complete. The VST3 installed in `/Volumes/External SSD/Ableton/VST3 Plug-In` is the Phase 6 build and needs reinstalling for that.
+
+**Next steps:** Phase 8 — EQ + spectral analyzer.
+
+**Open questions this session:**
+- **Module-type changes from host automation land up to ~33 ms late.** Modules are built on the message thread by a ~30 Hz poll, so an empty slot costs no memory, and so they land later still in a faster-than-real-time bounce. The controls within a module are applied per block. If type automation turns out to matter, every slot would need every module pre-built: about 55 MB at 192 kHz, mostly delay lines.
+- **Swapping between a linear and an oversampled module while a note rings moves the latency**, and the route alignment jumps with it: an audible glitch on that change only. Bypass and mix never move latency.
+- **§4 puts the four macro knobs on the main view**, with the full rack on the FX page. For now they live on the FX page only; where they sit on the Edit page is a Phase 12 layout question. The FX page doesn't yet draw a macro's live effect on a knob; `FXEngine::getEffectiveValue` exposes it for the skin.
+- Macro assignments are not in the undo history (nor is any parameter). Consistent for now, but worth revisiting with the Phase 11 preset browser.
 
 ---
 

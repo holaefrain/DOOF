@@ -1,6 +1,6 @@
 # DOOF — User Guide
 
-DOOF is a kick-drum synthesizer plugin (VST3 + Standalone). This guide reflects the plugin as built through **Phase 6** (sub tuning and phase tools).
+DOOF is a kick-drum synthesizer plugin (VST3 + Standalone). This guide reflects the plugin as built through **Phase 7** (the FX section).
 
 DOOF is under construction, so parts of the interface describe features that exist and parts are still stubs. Where something isn't built yet, this guide says so rather than leaving you to find out.
 
@@ -233,6 +233,81 @@ DOOF holds the lock by bending the pitch very slightly over the tenth of a secon
 
 ---
 
+## The FX page
+
+The tabs at the top left switch between the **Edit** page (layers, curves, panels) and the **FX** page. **Save…** and **Load…** sit at the top right on both.
+
+### Routing
+
+The **Routing** row sets where each layer goes:
+
+| Route | Where the layer goes |
+|---|---|
+| **Dry** | Straight to Master, skipping both inserts. Every layer starts here. |
+| **Insert A** / **Insert B** | Through that insert's chain, then to Master. |
+| **Both** | Through Insert A *and* Insert B side by side, at full level into each, and the two results are added. This is parallel processing: for example, a clean compressor in one insert and heavy distortion in the other. With both inserts empty the layer is twice as loud, so use the insert levels to balance it. |
+
+### Channels and slots
+
+There are three channels: **Insert A**, **Insert B** and **Master**, each with six slots that process top to bottom. Master processes everything: the Dry layers and both inserts together.
+
+- Each tile shows its module. The light is **green** when the module is on and **grey** when it's bypassed. Empty slots cost no CPU.
+- **Click a tile** to edit it below.
+- **Drag a tile onto another** to swap them. Each module keeps its settings and macro assignments when it moves.
+- The slider beside **Insert A** and **Insert B** sets that insert's output level.
+
+With every slot empty and every layer on Dry, DOOF sounds exactly as it did before the FX existed. This is the default.
+
+### The slot editor
+
+- **Module menu.** Picking a module loads its own default settings and switches it on.
+- **On.** Bypasses the module. A bypassed module passes the sound through exactly unchanged, and doesn't use CPU.
+- **Mix.** Blends the unprocessed sound (0%) with the processed sound (100%). Delay and Reverb start at a partial mix; everything else starts at 100%.
+- **Knobs.** Only the controls the module uses are shown, labelled and in their own units (Hz, dB, ms, ratio, bits). Double-click a knob to return it to that module's default, or click its value and type one in. "2k" and "1.5 s" both work.
+
+### Modules
+
+| Module | What it does | Controls |
+|---|---|---|
+| **Clip** | Clips the peaks off at a ceiling. Softness rounds the corners; Bias makes one side clip first, adding warmth. | Drive, Ceiling, Softness, Bias, Output |
+| **Tube** | Valve-style saturation. More Bias, more even harmonics. | Drive, Bias, Tone, Output |
+| **Wave** | Wavefolder. Past its threshold the wave folds back on itself, getting brighter and more complex as you push it rather than flatter. | Fold, Symmetry, Shape (sine fold → triangle fold), Tone, Output |
+| **Tape** | Gentle saturation, a low "head bump" at 80 Hz, and tape's high-end roll-off. | Drive, Bump, Tone, Output |
+| **Drive** | Overdrive that can leave the sub alone. Only the frequencies above **Crossover** are driven; below it stays clean. At the lowest crossover it drives everything. | Drive, Crossover, Tone, Output |
+| **Bit Crusher** | Lower bit depth and sample rate, for digital grit. | Bits (1–16), Rate, Output |
+| **Ring Mod** | Multiplies the sound by a tone, for metallic, clangy textures. Spread detunes the right channel for width. | Frequency, Spread, Shape (sine → square), Output |
+| **Filter** | Low pass, high pass, band pass or notch, at 12 or 24 dB per octave. | Mode, Cutoff, Resonance, Slope |
+| **EQ** | Three bands: a low shelf, a mid bell and a high shelf. | Low/Mid/High Gain and Freq |
+| **Compressor** | A full compressor. | Threshold, Ratio, Attack, Release, Knee, Makeup |
+| **Dual Comp** | Two compressors in one slot: a fast **Peak** stage that catches the transient, feeding a slower **Glue** stage. Speed sets both stages' timing together. | Peak Thresh/Ratio, Glue Thresh/Ratio, Speed, Makeup |
+| **Delay** | Stereo delay with filtered repeats. Ping-Pong bounces the repeats left and right. Turn **Sync** on to set the time as a note value of the DAW's tempo (Division) instead of in ms. | Time, Feedback, Tone, Ping-Pong, Sync, Division |
+| **Reverb** | Decay is the reverb time (RT60). Low Cut keeps it off the sub so the low end stays tight. | Decay, Pre-Delay, Damping, Size, Width, Low Cut |
+
+For a second compressor, put another Compressor (or Dual Comp) in another slot.
+
+### Macros
+
+The four **Macro** knobs at the bottom each move any number of slot controls at once. The DAW can automate them, as Macro 1–4.
+
+- **Right-click any knob in the slot editor** (Mix included) and choose **Assign to Macro 1–4**. A new assignment sweeps the control from where it's set to the far end of its range, so turning the macro up always does something.
+- Click a **Macro** button to see what that macro drives in the list beside it. Each row has a **depth** slider (−100% to +100%; negative means turning the macro up turns the control down) and an **x** to remove it.
+- In the slot editor, **M1**–**M4** after a control's name shows which macros drive it.
+- Changing a slot's module clears that slot's assignments, because they pointed at the old module's controls.
+
+### Oversampling
+
+The **Oversampling** menu (Off / 2x / 4x / 8x, default 2x) applies to the distortions and Ring Mod. Distortion creates new high frequencies. Without oversampling, those above the top of the audio range fold back down as harsh, out-of-tune aliasing. Higher settings remove more of it and use more CPU.
+
+Oversampling adds a small delay, about 1–1.5 ms per oversampled module at 44.1 kHz. DOOF reports it to your DAW, which compensates, and DOOF keeps all three routes lined up internally, so a layer split across Dry and an insert stays in phase.
+
+### Good to know
+
+- Adding or removing an oversampled module changes that delay. If a note is ringing at that moment, you may hear a small glitch, on that change only.
+- When the DAW automates a slot's **module type**, the change lands within about 1/30 of a second rather than on the exact sample. Automation of the controls within a module is precise.
+- Macro assignments are saved with presets and projects, but like knob moves, they aren't part of undo.
+
+---
+
 ## Undo and redo
 
 - **Cmd+Z** to undo, **Cmd+Shift+Z** to redo (Ctrl on Windows).
@@ -246,13 +321,13 @@ Loading a preset clears the history: a freshly loaded patch isn't an edit you ca
 
 ## Presets
 
-**Save…** and **Load…** write and read a `.doof` file. It holds the complete patch: every layer's type, level, mute and solo, each layer's click type, tone and decay, each layer's harmonics, sustain and phase, both envelopes for all five layers (including which nodes are keytracked and phase-locked), each layer's Length and view settings, Tune, Key Root, and the master gain.
+**Save…** and **Load…** (top right, on either page) write and read a `.doof` file. It holds the complete patch: every layer's type, level, mute, solo and route, each layer's click type, tone and decay, each layer's harmonics, sustain and phase, both envelopes for all five layers (including which nodes are keytracked and phase-locked), each layer's Length and view settings, Tune, Key Root, the master gain, and the whole FX section: every slot's module and settings, the insert levels, oversampling, the macros, and what each macro drives.
 
 A preset stores which sample *slot* a Click layer uses, not the file. Renaming or reordering the files in `resources/clicks/` changes what those presets play.
 
 This is the same state your DAW saves with its project, so a patch that sounds right in the plugin will sound right when you reopen the session.
 
-Older `.doof` files still load. A preset saved before layers existed opens as the single-layer patch it described, with the other four layers returned to their factory state.
+Older `.doof` files still load. A preset saved before layers existed opens as the single-layer patch it described, with the other four layers returned to their factory state. A preset saved before the FX section existed opens with every slot empty and every layer on Dry, which is exactly how it sounded.
 
 ---
 
@@ -260,7 +335,7 @@ Older `.doof` files still load. A preset saved before layers existed opens as th
 
 So you know where the edges are:
 
-- **FX, routing, EQ, analyzer, master limiter** (Phases 7–9).
+- **The 4-band EQ with a spectrum analyzer, and the master limiter** (Phases 8–9).
 - **Sidechain triggering** (Phase 10).
 - **Preset browser and drag-out export** (Phase 11) — for now, presets are plain `.doof` files you manage yourself.
 - **The finished skin** (Phase 12). The current flat dark look is a working surface, not the intended design.

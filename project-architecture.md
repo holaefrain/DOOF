@@ -296,7 +296,7 @@ Layer 5 ┘
 - **Swappable-module host automation:** VST3/AU expect a *fixed* parameter list. Solution (decided): a fixed generic set of **slot parameters** per slot that each module maps onto.
 - **Macros:** 4 macro params, each with a list of (target param, range, polarity) assignments.
 - Smooth all user-facing params; report any added latency for host compensation.
-- **Open:** slots per insert; fixed vs free reordering; dual-comp as one module or two slots.
+- **Decided (2026-11-17, user's choices):** six slots per channel; free reordering by drag-to-swap; both a single Compressor module and a Dual Comp module; "Both" routes a layer to the two inserts in parallel at full level. Details and the build decisions are in dev-log.md.
 
 ### 7.2 EQ with spectral analyzer
 - **EQ:** 4 bands of biquad/IIR (`juce::dsp::IIR`) — typical low shelf, two bells, high shelf (confirm). Per-band freq/gain/Q/on-off; smooth coefficient changes.
@@ -333,7 +333,7 @@ Layer 5 ┘
 
 **Open / to revisit:**
 - Preset browser depth beyond the basics — how rich the categories/tag/search system gets (Phase 11, low coupling).
-- FX: slots per insert; fixed vs free reordering; dual-comp as one module or two.
+- *(FX slots, reordering and dual-comp decided 2026-11-17 - see §7.1 and dev-log.md.)*
 - Analyzer FFT size/overlap/window; EQ band types and ranges.
 - Sidechain: pass-through vs detection-only; kick-band-limited detection.
 - Export: user-selectable bit depth/sample rate; default tail-length cap.
