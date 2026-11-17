@@ -4,6 +4,7 @@
 #include "LayerStrip.h"
 #include "ClickPanel.h"
 #include "SubPanel.h"
+#include "FXPage.h"
 #include <array>
 #include <memory>
 
@@ -39,6 +40,13 @@ public:
     // Component IDs on the global tuning controls, for tests (Phase 6).
     static const char* const tuneSliderID;
     static const char* const keyRootSliderID;
+
+    // The page tabs (§4: Edit · FX · EQ · Limiter · Settings - the first two exist from Phase 7).
+    enum class Page { edit, fx };
+    void showPage(Page page);
+    Page getPage() const { return currentPage; }
+    static const char* const editTabID;
+    static const char* const fxTabID;
 
 private:
     // Shared by keyPressed and the undo/redo buttons. Either model's
@@ -117,6 +125,19 @@ private:
 
     // Height SubPanel takes from the bottom of the editing area when it is showing.
     static constexpr int kSubPanelHeight = 110;
+
+    // The page tabs, and the FX page (Phase 7). The Edit page is every other control in this class:
+    // they stay direct children, shown and hidden as a set, so nothing about them moved for FX.
+    juce::TextButton editTab { "Edit" };
+    juce::TextButton fxTab   { "FX" };
+    Page currentPage = Page::edit;
+    FXPage fxPage;
+
+    // Height of the tab row across the top of every page.
+    static constexpr int kTabRowHeight = 28;
+
+    // Everything on the Edit page that is not governed by refreshContextualPanel.
+    std::vector<juce::Component*> editPageFixtures();
 
     // The central canvas (§3.4): pitch + amp curves overlaid on one time axis.
     // Declared after audioProcessor since its constructor reads model

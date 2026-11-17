@@ -115,6 +115,7 @@ target_sources(DOOF
         src/FXTime.cpp            # Delay, Reverb
         src/FXEngine.cpp          # slots, inserts, route alignment, master (§7.1)
         src/MacroAssignments.cpp  # the four macros' assignments + their audio-thread snapshot
+        src/FXPage.cpp            # the FX page: routing, channels, slot editor, macros
 )
 
 # Compile-time definitions applied to the plugin target.
@@ -234,6 +235,7 @@ target_sources(DOOFIntegrationTests
         src/FXTime.cpp
         src/FXEngine.cpp
         src/MacroAssignments.cpp
+        src/FXPage.cpp
 )
 
 target_include_directories(DOOFIntegrationTests PRIVATE src)

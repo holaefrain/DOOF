@@ -9,6 +9,7 @@
 #include "SubPanel.h"
 #include "PitchSnap.h"
 #include "FXEngine.h"
+#include "FXPage.h"
 
 #include <juce_dsp/juce_dsp.h> // FFT for Phase5VerifyTest (c)
 
@@ -5024,6 +5025,214 @@ public:
 };
 
 static Phase7StateTest phase7StateTest;
+
+
+// Phase7EditorTest — the FX page and the page tabs, driven the way a person would through the
+// real editor.
+class Phase7EditorTest : public juce::UnitTest
+{
+public:
+    Phase7EditorTest() : juce::UnitTest("Phase7Editor") {}
+
+    // findChildWithID only looks one level down; the assignment rows sit inside a viewport.
+    static juce::Component* findDeep(juce::Component& root, const juce::String& id)
+    {
+        if (root.getComponentID() == id)
+            return &root;
+        for (auto* child : root.getChildren())
+            if (auto* found = findDeep(*child, id))
+                return found;
+        return nullptr;
+    }
+
+    template <typename T>
+    static T* find(juce::Component& root, const juce::String& id) { return dynamic_cast<T*>(findDeep(root, id)); }
+
+    // The canvas and the layer strips carry no IDs; they are the editor's only children of their type.
+    template <typename T>
+    static T* firstOfType(juce::Component& root)
+    {
+        for (auto* child : root.getChildren())
+            if (auto* typed = dynamic_cast<T*>(child))
+                return typed;
+        return nullptr;
+    }
+
+    struct Rig
+    {
+        DOOFAudioProcessor processor;
+        std::unique_ptr<juce::AudioProcessorEditor> owned { processor.createEditor() };
+        DOOFAudioProcessorEditor& editor { *dynamic_cast<DOOFAudioProcessorEditor*>(owned.get()) };
+        FXPage& page { *dynamic_cast<FXPage*>(editor.findChildWithID(FXPage::pageID)) };
+    };
+
+    static void pump(int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); }
+
+    void runTest() override
+    {
+        using namespace Phase7Fixtures;
+
+        beginTest("(a) The FX tab swaps the whole editing area for the FX page and back, and the poll leaves it alone");
+        {
+            Rig r;
+            auto* canvas = firstOfType<EnvelopeCanvas>(r.editor);
+            auto* strip  = firstOfType<LayerStrip>(r.editor);
+            auto* fxTab  = find<juce::TextButton>(r.editor, DOOFAudioProcessorEditor::fxTabID);
+            auto* edit   = find<juce::TextButton>(r.editor, DOOFAudioProcessorEditor::editTabID);
+            expect(canvas != nullptr && strip != nullptr && fxTab != nullptr && edit != nullptr);
+            if (canvas == nullptr || strip == nullptr || fxTab == nullptr || edit == nullptr)
+                return;
+
+            expect(canvas->isVisible() && ! r.page.isVisible(), "Opens on the Edit page");
+
+            fxTab->onClick();
+            expect(r.page.isVisible() && ! canvas->isVisible() && ! strip->isVisible());
+            expect(r.editor.getPage() == DOOFAudioProcessorEditor::Page::fx && fxTab->getToggleState());
+
+            // Layer 1 becomes a Click while the FX page shows: the poll must not paint the click panel
+            // over it - and the Edit page must come back showing the click panel, not the canvas.
+            set(r.processor, ParamIDs::layerType(0), (float) (int) ParamIDs::LayerType::click);
+            pump(120);
+            auto* clickPanel = r.editor.findChildWithID(ClickPanel::panelID);
+            expect(! clickPanel->isVisible() && ! canvas->isVisible(), "Nothing from the Edit page shows through");
+
+            edit->onClick();
+            expect(! r.page.isVisible() && strip->isVisible());
+            expect(clickPanel->isVisible() && ! canvas->isVisible(), "Back on Edit, the panel matches the layer's new type");
+
+            // And with nothing changed in between, the panel still comes back.
+            fxTab->onClick();
+            expect(! clickPanel->isVisible());
+            edit->onClick();
+            expect(clickPanel->isVisible(), "A round trip with no type change restores the panel");
+        }
+
+        beginTest("(b) Each layer's route box follows its parameter both ways, and so does oversampling");
+        {
+            Rig r;
+            auto* route3 = find<juce::ComboBox>(r.page, FXPage::routeID(2));
+            auto* oversampling = find<juce::ComboBox>(r.page, FXPage::oversamplingID);
+            expect(route3 != nullptr && oversampling != nullptr);
+            if (route3 == nullptr || oversampling == nullptr)
+                return;
+
+            expectEquals(route3->getText(), juce::String("Dry"));
+            route3->setSelectedId((int) FX::Route::both + 1, juce::sendNotificationSync);
+            expectEquals(juce::roundToInt(raw(r.processor, ParamIDs::layerRoute(2))), (int) FX::Route::both);
+
+            set(r.processor, ParamIDs::layerRoute(2), (float) (int) FX::Route::insertB);
+            pump(50);
+            expectEquals(route3->getText(), juce::String("Insert B"));
+
+            expectEquals(oversampling->getText(), juce::String("2x"));
+            oversampling->setSelectedId(4, juce::sendNotificationSync);
+            expectEquals(juce::roundToInt(raw(r.processor, ParamIDs::fxOversampling)), 3);
+        }
+
+        beginTest("(c) Picking a module loads its defaults, names its tile, and shows only its controls, in its units");
+        {
+            Rig r;
+            r.page.selectSlot(7); // Insert B, slot 2
+            auto* typeBox = find<juce::ComboBox>(r.page, FXPage::slotTypeID);
+            typeBox->setSelectedId((int) FX::ModuleType::filter + 1, juce::sendNotificationSync);
+
+            expectEquals(juce::roundToInt(raw(r.processor, ParamIDs::fxSlotType(7))), (int) FX::ModuleType::filter);
+            expect(r.page.getTileType(7) == FX::ModuleType::filter, "The tile names the module");
+
+            auto* cutoff = find<juce::Slider>(r.page, FXPage::slotParamID(1));
+            auto* fifth  = find<juce::Slider>(r.page, FXPage::slotParamID(4));
+            expect(cutoff->isVisible() && ! fifth->isVisible(), "Filter uses four controls");
+            expectEquals(cutoff->getTextFromValue(cutoff->getValue()), juce::String("2.00 kHz"));
+
+            // The knob drives this slot...
+            cutoff->setValue(FX::toNormalised(FX::getInfo(FX::ModuleType::filter).params[1], 500.0f), juce::sendNotificationSync);
+            expectWithinAbsoluteError(FX::toValue(FX::getInfo(FX::ModuleType::filter).params[1], raw(r.processor, ParamIDs::fxSlotParam(7, 1))),
+                                      500.0f, 1.0f);
+
+            // ...and, once another slot is selected, that one instead - leaving this one alone.
+            r.page.selectSlot(0);
+            const float before = raw(r.processor, ParamIDs::fxSlotParam(7, 1));
+            cutoff->setValue(0.1, juce::sendNotificationSync);
+            expectEquals(raw(r.processor, ParamIDs::fxSlotParam(7, 1)), before);
+            expectWithinAbsoluteError(raw(r.processor, ParamIDs::fxSlotParam(0, 1)), 0.1f, 1.0e-6f);
+        }
+
+        beginTest("(d) A type changed by the host is followed: the editor re-labels, the tile renames");
+        {
+            Rig r;
+            r.page.selectSlot(12);
+            set(r.processor, ParamIDs::fxSlotType(12), (float) (int) FX::ModuleType::delay);
+            r.page.refresh();
+
+            auto* typeBox = find<juce::ComboBox>(r.page, FXPage::slotTypeID);
+            expectEquals(typeBox->getText(), juce::String("Delay"));
+            expect(find<juce::Slider>(r.page, FXPage::slotParamID(5))->isVisible(), "Delay uses all six");
+            expect(r.page.getTileType(12) == FX::ModuleType::delay);
+        }
+
+        beginTest("(e) Dropping one tile on another swaps the two slots, assignments included");
+        {
+            Rig r;
+            r.processor.setFXSlotModule(0, FX::ModuleType::drive);
+            r.processor.getMacroAssignments().assign(0, 0, 0, 0.4f);
+            r.page.refresh();
+
+            auto* target = dynamic_cast<juce::DragAndDropTarget*>(find<juce::Component>(r.page, FXPage::slotTileID(15)));
+            auto* source = find<juce::Component>(r.page, FXPage::slotTileID(0));
+            expect(target != nullptr && source != nullptr);
+            if (target == nullptr || source == nullptr)
+                return;
+
+            const juce::DragAndDropTarget::SourceDetails drop { "fxslot:0", source, {} };
+            expect(target->isInterestedInDragSource(drop));
+            target->itemDropped(drop);
+
+            expectEquals(juce::roundToInt(raw(r.processor, ParamIDs::fxSlotType(15))), (int) FX::ModuleType::drive);
+            expectEquals(juce::roundToInt(raw(r.processor, ParamIDs::fxSlotType(0))), (int) FX::ModuleType::none);
+            expect(r.processor.getMacroAssignments().isAssigned(0, 15, 0));
+            expectEquals(r.page.getSelectedSlot(), 15, "The dropped module is selected");
+
+            // Something that is not a slot tile is not accepted.
+            expect(! target->isInterestedInDragSource({ "somethingElse", source, {} }));
+        }
+
+        beginTest("(f) Assigning from a knob sweeps to the far end; the list shows it, edits its depth, and removes it");
+        {
+            Rig r;
+            r.processor.setFXSlotModule(3, FX::ModuleType::filter); // cutoff defaults to 2 kHz, two-thirds up
+            r.page.selectSlot(3);
+            r.page.assignToMacro(1, 1);
+
+            auto& model = r.processor.getMacroAssignments();
+            const float base = FX::defaultNormalised(FX::getInfo(FX::ModuleType::filter).params[1]);
+            expectWithinAbsoluteError(model.getDepth(1, 3, 1), -base, 1.0e-6f, "Above halfway, so it sweeps down to the bottom");
+            expectEquals(r.page.getSelectedMacro(), 1);
+            expectEquals(find<juce::TextButton>(r.page, FXPage::macroSelectID(1))->getButtonText(), juce::String("Macro 2 (1)"));
+
+            auto* row = find<juce::Component>(r.page, "fxAssignRow0");
+            expect(row != nullptr, "The list shows the assignment");
+            if (row == nullptr)
+                return;
+
+            find<juce::Slider>(*row, "depth")->setValue(25.0, juce::sendNotificationSync);
+            expectWithinAbsoluteError(model.getDepth(1, 3, 1), 0.25f, 1.0e-6f);
+
+            // The mix is assignable too, and the editor marks what each macro drives.
+            r.page.assignToMacro(1, FX::kMixTarget);
+            expect(model.isAssigned(1, 3, FX::kMixTarget));
+
+            find<juce::Button>(*row, "remove")->onClick();
+            r.page.refresh();
+            expect(! model.isAssigned(1, 3, 1));
+            expect(find<juce::Component>(r.page, "fxAssignRow1") == nullptr, "One row left");
+
+            r.page.removeFromMacro(1, FX::kMixTarget);
+            expectEquals((int) model.getAssignments(1).size(), 0);
+        }
+    }
+};
+
+static Phase7EditorTest phase7EditorTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 

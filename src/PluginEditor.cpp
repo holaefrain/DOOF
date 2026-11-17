@@ -10,11 +10,14 @@
 const char* const DOOFAudioProcessorEditor::placeholderID   = "contextualPlaceholder";
 const char* const DOOFAudioProcessorEditor::tuneSliderID    = "masterTune";
 const char* const DOOFAudioProcessorEditor::keyRootSliderID = "keyRoot";
+const char* const DOOFAudioProcessorEditor::editTabID       = "tabEdit";
+const char* const DOOFAudioProcessorEditor::fxTabID         = "tabFX";
 
 DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
       clickPanel(p.apvts, p.getClickSamples()),
       subPanel(p.apvts),
+      fxPage(p),
       envelopeCanvas(p.getLayer(0).pitchModel, juce::Range<double>(20.0, 220.0),
                      p.getLayer(0).ampModel,   juce::Range<double>(0.0, 1.0),
                      juce::jmax(p.getLayer(0).pitchModel.getLength(), p.getLayer(0).ampModel.getLength()), p)
@@ -202,7 +205,22 @@ DOOFAudioProcessorEditor::DOOFAudioProcessorEditor(DOOFAudioProcessor& p)
     addAndMakeVisible(ampLengthValue);
     addAndMakeVisible(savePresetButton);
     addAndMakeVisible(loadPresetButton);
-    // 700 tall so the canvas keeps its pre-Phase-6 height with the Sub panel beneath it.
+
+    // Page tabs. Radio buttons, so exactly one is lit.
+    for (auto* tab : { &editTab, &fxTab })
+    {
+        tab->setClickingTogglesState(true);
+        tab->setRadioGroupId(0x5047); // "PG"
+        tab->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffe0a030).withAlpha(0.6f));
+        addAndMakeVisible(*tab);
+    }
+    editTab.setComponentID(editTabID);
+    fxTab.setComponentID(fxTabID);
+    editTab.setToggleState(true, juce::dontSendNotification);
+    editTab.onClick = [this] { showPage(Page::edit); };
+    fxTab.onClick   = [this] { showPage(Page::fx); };
+    addChildComponent(fxPage);
+    // 700 tall: the Sub panel (Phase 6) and the page tabs (Phase 7) share what the canvas used to have.
     setSize(800, 700);
 
     // The editor is always built against state that already exists - plugin open, preset load,
@@ -243,6 +261,16 @@ void DOOFAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
 
+    // The tab row, on every page: the tabs at the left, preset save/load (also global) at the right.
+    auto tabRow = bounds.removeFromTop(kTabRowHeight);
+    editTab.setBounds(tabRow.removeFromLeft(80).reduced(2));
+    fxTab.setBounds(tabRow.removeFromLeft(80).reduced(2));
+    loadPresetButton.setBounds(tabRow.removeFromRight(70).reduced(2));
+    savePresetButton.setBounds(tabRow.removeFromRight(70).reduced(2));
+
+    // Everything below the tabs is the FX page when it shows.
+    fxPage.setBounds(bounds);
+
     auto topBar = bounds.removeFromTop(24);
     pitchLogToggle.setBounds(topBar.removeFromLeft(160).reduced(2));
     pitchSnapToggle.setBounds(topBar.removeFromLeft(120).reduced(2));
@@ -255,8 +283,6 @@ void DOOFAudioProcessorEditor::resized()
     pitchLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
     ampLengthCaption.setBounds(secondBar.removeFromLeft(90).reduced(2));
     ampLengthValue.setBounds(secondBar.removeFromLeft(60).reduced(2));
-    savePresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
-    loadPresetButton.setBounds(secondBar.removeFromLeft(70).reduced(2));
 
     // The global tuning pair, at the right of the second bar.
     keyRootSlider.setBounds(secondBar.removeFromRight(100).reduced(2));
@@ -309,6 +335,11 @@ void DOOFAudioProcessorEditor::applyViewPrefsToUI()
 
 void DOOFAudioProcessorEditor::refreshContextualPanel()
 {
+    // The FX page covers the editing area; nothing here may show through it. showPage puts the
+    // panel back on returning to the Edit page.
+    if (currentPage != Page::edit)
+        return;
+
     const int type = (int) layerTypeParams[(size_t) selectedLayer]->load();
 
     if (selectedLayer == lastShownLayer && type == lastShownType)
@@ -362,6 +393,46 @@ void DOOFAudioProcessorEditor::timerCallback()
 
     // Sustain can be automated too; the canvas draws the loop band only while it is on.
     envelopeCanvas.setSustainLoopShown(layerSustainParams[(size_t) selectedLayer]->load() > 0.5f);
+}
+
+std::vector<juce::Component*> DOOFAudioProcessorEditor::editPageFixtures()
+{
+    std::vector<juce::Component*> fixtures { &tuneCaption, &tuneSlider, &keyRootCaption, &keyRootSlider,
+                                             &undoButton, &redoButton };
+    for (auto& strip : layerStrips)
+        fixtures.push_back(strip.get());
+    return fixtures;
+}
+
+void DOOFAudioProcessorEditor::showPage(Page page)
+{
+    currentPage = page;
+    const bool edit = (page == Page::edit);
+
+    (edit ? editTab : fxTab).setToggleState(true, juce::dontSendNotification);
+
+    for (auto* component : editPageFixtures())
+        component->setVisible(edit);
+
+    if (edit)
+    {
+        fxPage.setVisible(false);
+
+        // Re-decided from scratch: the contextual panel may have changed type while hidden.
+        lastShownLayer = lastShownType = -1;
+        refreshContextualPanel();
+    }
+    else
+    {
+        // Everything refreshContextualPanel might have shown goes too.
+        for (auto* component : std::initializer_list<juce::Component*> {
+                 &envelopeCanvas, &subPanel, &clickPanel, &contextualPlaceholder, &pitchLogToggle,
+                 &pitchSnapToggle, &editingCurveBox, &pitchLengthCaption, &pitchLengthValue,
+                 &ampLengthCaption, &ampLengthValue })
+            component->setVisible(false);
+
+        fxPage.setVisible(true);
+    }
 }
 
 void DOOFAudioProcessorEditor::setSelectedLayer(int layerIndex)
