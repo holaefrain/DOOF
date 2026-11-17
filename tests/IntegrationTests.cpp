@@ -8,6 +8,7 @@
 #include "ClickPanel.h"
 #include "SubPanel.h"
 #include "PitchSnap.h"
+#include "FXEngine.h"
 
 #include <juce_dsp/juce_dsp.h> // FFT for Phase5VerifyTest (c)
 
@@ -4595,6 +4596,434 @@ static Phase6VerifyTest phase6VerifyTest;
 
 
 
+
+// ── Phase 7: FX section, through the real processor ─────────────────────────
+
+namespace Phase7Fixtures
+{
+    constexpr double kSr = 44100.0;
+    constexpr int kBlock = 512;
+
+    // By real value (a choice index, 0/1, a level), letting the parameter normalise.
+    inline void set(DOOFAudioProcessor& p, const juce::String& id, float realValue)
+    {
+        auto* param = p.apvts.getParameter(id);
+        jassert(param != nullptr);
+        param->setValueNotifyingHost(param->convertTo0to1(realValue));
+    }
+
+    inline float raw(DOOFAudioProcessor& p, const juce::String& id)
+    {
+        auto* value = p.apvts.getRawParameterValue(id);
+        return value != nullptr ? value->load() : std::numeric_limits<float>::quiet_NaN();
+    }
+
+    // A slot control by its value in the module's own units ("1000" Hz, "-12" dB).
+    inline void setControl(DOOFAudioProcessor& p, int slot, int index, float realValue)
+    {
+        const auto type = (FX::ModuleType) juce::roundToInt(raw(p, ParamIDs::fxSlotType(slot)));
+        set(p, ParamIDs::fxSlotParam(slot, index), FX::toNormalised(FX::getInfo(type).params[(size_t) index], realValue));
+    }
+
+    // Layer `layer` plays a steady sine at hz, at full level, for the envelopes' whole 4 s domain.
+    inline void steadyTone(DOOFAudioProcessor& p, int layer, double hz)
+    {
+        auto& l = p.getLayer(layer);
+        l.pitchModel.setState(juce::ValueTree(EnvelopeIDs::envelopeType));
+        l.ampModel.setState(juce::ValueTree(EnvelopeIDs::envelopeType));
+        l.pitchModel.addNode(0.0, hz);
+        l.pitchModel.addNode(3.9, hz);
+        l.ampModel.addNode(0.0, 1.0);
+        l.ampModel.addNode(3.9, 1.0);
+        l.pitchModel.setLength(3.9);
+        l.ampModel.setLength(3.9);
+    }
+
+    struct Render
+    {
+        std::vector<float> left, right;
+    };
+
+    // Prepares (so the slots' modules are installed directly, with no crossfade), then renders
+    // `seconds` after a note-on at sample 0. `perBlock` runs before each block, for automation.
+    inline Render render(DOOFAudioProcessor& p, double seconds, int block = kBlock,
+                         const std::function<void(int)>& perBlock = nullptr, int note = 60, int noteAt = 0)
+    {
+        p.prepareToPlay(kSr, block);
+        const int total = (int) (seconds * kSr);
+        Render out;
+        for (int start = 0, index = 0; start < total; start += block, ++index)
+        {
+            if (perBlock)
+                perBlock(index);
+
+            const int n = juce::jmin(block, total - start);
+            juce::AudioBuffer<float> buffer(2, n);
+            juce::MidiBuffer midi;
+            if (noteAt >= start && noteAt < start + n)
+                midi.addEvent(juce::MidiMessage::noteOn(1, note, (juce::uint8) 100), noteAt - start);
+            p.processBlock(buffer, midi);
+            out.left.insert(out.left.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + n);
+            out.right.insert(out.right.end(), buffer.getReadPointer(1), buffer.getReadPointer(1) + n);
+        }
+        return out;
+    }
+
+    inline bool identical(const std::vector<float>& expected, const std::vector<float>& actual, size_t offset = 0)
+    {
+        if (expected.size() != actual.size())
+            return false;
+        for (size_t i = 0; i < actual.size(); ++i)
+            if (! juce::exactlyEqual(i < offset ? 0.0f : expected[i - offset], actual[i]))
+                return false;
+        return true;
+    }
+
+    inline float worstDifference(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        float worst = 0.0f;
+        for (size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+            worst = std::max(worst, std::abs(a[i] - b[i]));
+        return worst;
+    }
+
+    // Hann-windowed Goertzel amplitude at exactly hz over [from, to) seconds.
+    inline double amplitudeAt(const std::vector<float>& x, double hz, double fromSec, double toSec)
+    {
+        const int start = (int) (fromSec * kSr), length = (int) ((toSec - fromSec) * kSr);
+        const double coeff = 2.0 * std::cos(juce::MathConstants<double>::twoPi * hz / kSr);
+        double s1 = 0.0, s2 = 0.0, windowSum = 0.0;
+        for (int n = 0; n < length; ++n)
+        {
+            const double w = 0.5 * (1.0 - std::cos(juce::MathConstants<double>::twoPi * n / (length - 1)));
+            const double v = x[(size_t) (start + n)] * w + coeff * s1 - s2;
+            s2 = s1;
+            s1 = v;
+            windowSum += w;
+        }
+        return 2.0 * std::sqrt(juce::jmax(0.0, s1 * s1 + s2 * s2 - coeff * s1 * s2)) / windowSum;
+    }
+
+    inline double toDb(double ratio) { return 20.0 * std::log10(juce::jmax(1.0e-12, ratio)); }
+
+    // A module run offline over a rendered signal - the reference a processor render through that
+    // module is compared against.
+    inline std::vector<float> processOffline(FX::ModuleType type, const FX::SlotValues& values,
+                                             const std::vector<float>& input, int oversampling = 0)
+    {
+        auto module = FX::createModule(type, oversampling);
+        module->prepare(kSr, kBlock);
+        std::vector<float> l = input, r = input;
+        for (size_t start = 0; start < l.size(); start += kBlock)
+        {
+            const int n = (int) std::min<size_t>(kBlock, l.size() - start);
+            module->setParameters(values, {});
+            module->process(l.data() + start, r.data() + start, n);
+        }
+        return l;
+    }
+
+    inline FX::SlotValues slotValues(DOOFAudioProcessor& p, int slot)
+    {
+        FX::SlotValues v {};
+        for (int k = 0; k < FX::kNumSlotParams; ++k)
+            v[(size_t) k] = raw(p, ParamIDs::fxSlotParam(slot, k));
+        return v;
+    }
+
+    constexpr int kInsertA1 = 0;   // Insert A, slot 1
+    constexpr int kInsertB1 = 6;   // Insert B, slot 1
+    constexpr int kMaster1  = 12;  // Master, slot 1
+}
+
+// Phase7ProcessorTest — the FX section as the processor drives it: routing, the slot helpers the FX
+// page uses, latency and tail reporting, and host blocks larger than announced.
+class Phase7ProcessorTest : public juce::UnitTest
+{
+public:
+    Phase7ProcessorTest() : juce::UnitTest("Phase7Processor") {}
+
+    void runTest() override
+    {
+        using namespace Phase7Fixtures;
+
+        beginTest("(a) Routing through an empty insert changes nothing, at any insert; Both doubles exactly");
+        {
+            DOOFAudioProcessor p;
+            const auto dry = render(p, 0.5);
+
+            for (int route : { 1, 2 })
+            {
+                set(p, ParamIDs::layerRoute(0), (float) route);
+                expect(identical(dry.left, render(p, 0.5).left), "Route " + FX::routeChoices()[route]);
+            }
+
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::both);
+            const auto both = render(p, 0.5);
+            bool doubled = true;
+            for (size_t i = 0; i < dry.left.size(); ++i)
+                doubled = doubled && juce::exactlyEqual(both.left[i], 2.0f * dry.left[i]);
+            expect(doubled, "Both is parallel at full level: exactly twice the dry signal");
+
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::insertA);
+            set(p, ParamIDs::fxInsertLevel(0), 0.5f);
+            const auto half = render(p, 0.5);
+            bool halved = true;
+            for (size_t i = 0; i < dry.left.size(); ++i)
+                halved = halved && juce::exactlyEqual(half.left[i], 0.5f * dry.left[i]);
+            expect(halved, "Insert A's level scales it from the very first sample");
+        }
+
+        beginTest("(b) Each route reaches its own insert, and Both is the sum of the two");
+        {
+            DOOFAudioProcessor p;
+            p.setFXSlotModule(kInsertA1, FX::ModuleType::filter);
+            setControl(p, kInsertA1, 0, 1.0f);      // high pass
+            setControl(p, kInsertA1, 1, 2000.0f);   // well above the sub
+
+            const auto dry = render(p, 0.4);
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::insertA);
+            const auto viaA = render(p, 0.4);
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::insertB);
+            const auto viaB = render(p, 0.4);
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::both);
+            const auto viaBoth = render(p, 0.4);
+
+            expect(identical(dry.left, viaB.left), "Insert B is empty");
+            expectLessThan(amplitudeAt(viaA.left, 100.0, 0.05, 0.25), amplitudeAt(dry.left, 100.0, 0.05, 0.25) * 0.01,
+                           "Insert A's high pass removes the sub");
+
+            std::vector<float> sum(dry.left.size());
+            for (size_t i = 0; i < sum.size(); ++i)
+                sum[i] = viaA.left[i] + viaB.left[i];
+            expectLessThan(worstDifference(sum, viaBoth.left), 1.0e-6f);
+        }
+
+        beginTest("(c) Picking a module loads its defaults, switched on, and drops the slot's old macro assignments");
+        {
+            DOOFAudioProcessor p;
+            p.getMacroAssignments().assign(0, kInsertB1, 1, 0.5f);
+            p.getMacroAssignments().assign(1, kMaster1, 0, 0.5f);
+
+            p.setFXSlotModule(kInsertB1, FX::ModuleType::delay);
+            const auto& info = FX::getInfo(FX::ModuleType::delay);
+
+            expectEquals(juce::roundToInt(raw(p, ParamIDs::fxSlotType(kInsertB1))), (int) FX::ModuleType::delay);
+            expectEquals(raw(p, ParamIDs::fxSlotOn(kInsertB1)), 1.0f);
+            expectWithinAbsoluteError(raw(p, ParamIDs::fxSlotMix(kInsertB1)), info.defaultMix, 1.0e-6f);
+            for (int k = 0; k < FX::kNumSlotParams; ++k)
+                expectWithinAbsoluteError(raw(p, ParamIDs::fxSlotParam(kInsertB1, k)),
+                                          FX::defaultNormalised(info.params[(size_t) k]), 1.0e-6f);
+
+            expect(! p.getMacroAssignments().isAssigned(0, kInsertB1, 1), "The old module's assignment is gone");
+            expect(p.getMacroAssignments().isAssigned(1, kMaster1, 0), "Other slots' assignments stay");
+
+            // The host sees the controls in the module's own terms.
+            auto* time = p.apvts.getParameter(ParamIDs::fxSlotParam(kInsertB1, 0));
+            expectEquals(time->getCurrentValueAsText(), juce::String("250 ms"));
+            expectWithinAbsoluteError(FX::toValue(info.params[0], time->getValueForText("1.5 s")), 1500.0f, 0.5f);
+            auto* unused = p.apvts.getParameter(ParamIDs::fxSlotParam(kInsertA1, 5));
+            expectEquals(unused->getCurrentValueAsText(), juce::String("-"), "An empty slot's controls read as unused");
+        }
+
+        beginTest("(d) Swapping two slots swaps all nine controls and the macro assignments");
+        {
+            DOOFAudioProcessor p;
+            p.setFXSlotModule(kInsertA1, FX::ModuleType::filter);
+            setControl(p, kInsertA1, 1, 777.0f);
+            set(p, ParamIDs::fxSlotMix(kInsertA1), 0.4f);
+            set(p, ParamIDs::fxSlotOn(kInsertA1), 0.0f);
+            p.getMacroAssignments().assign(2, kInsertA1, 1, -0.3f);
+
+            p.setFXSlotModule(kMaster1 + 3, FX::ModuleType::reverb);
+            p.getMacroAssignments().assign(0, kMaster1 + 3, 0, 0.6f);
+
+            const auto filterValues = slotValues(p, kInsertA1);
+            const auto reverbValues = slotValues(p, kMaster1 + 3);
+
+            p.swapFXSlots(kInsertA1, kMaster1 + 3);
+
+            expectEquals(juce::roundToInt(raw(p, ParamIDs::fxSlotType(kInsertA1))), (int) FX::ModuleType::reverb);
+            expectEquals(juce::roundToInt(raw(p, ParamIDs::fxSlotType(kMaster1 + 3))), (int) FX::ModuleType::filter);
+            expectWithinAbsoluteError(raw(p, ParamIDs::fxSlotMix(kMaster1 + 3)), 0.4f, 1.0e-6f);
+            expectEquals(raw(p, ParamIDs::fxSlotOn(kMaster1 + 3)), 0.0f);
+            expectEquals(raw(p, ParamIDs::fxSlotOn(kInsertA1)), 1.0f);
+            for (int k = 0; k < FX::kNumSlotParams; ++k)
+            {
+                expectWithinAbsoluteError(raw(p, ParamIDs::fxSlotParam(kMaster1 + 3, k)), filterValues[(size_t) k], 1.0e-6f);
+                expectWithinAbsoluteError(raw(p, ParamIDs::fxSlotParam(kInsertA1, k)), reverbValues[(size_t) k], 1.0e-6f);
+            }
+
+            expect(p.getMacroAssignments().isAssigned(2, kMaster1 + 3, 1));
+            expect(p.getMacroAssignments().isAssigned(0, kInsertA1, 0));
+            expect(! p.getMacroAssignments().isAssigned(2, kInsertA1, 1));
+        }
+
+        beginTest("(e) The host is told the FX latency and tail, and both follow the slots");
+        {
+            DOOFAudioProcessor p;
+            p.prepareToPlay(kSr, kBlock);
+            expectEquals(p.getLatencySamples(), 0, "No FX, no latency");
+            expectEquals(p.getTailLengthSeconds(), 0.0);
+
+            p.setFXSlotModule(kInsertA1, FX::ModuleType::clip);
+            set(p, ParamIDs::fxOversampling, 1.0f); // 2x
+            p.prepareToPlay(kSr, kBlock);
+            const int oneAt2x = FX::oversamplingLatency(1, kBlock);
+            expectEquals(p.getLatencySamples(), oneAt2x);
+
+            // While running: offered on the poll, swapped in by the next block, reported on the next poll.
+            set(p, ParamIDs::fxOversampling, 2.0f); // 4x
+            p.updateFXModules();
+            juce::AudioBuffer<float> buffer(2, kBlock);
+            juce::MidiBuffer midi;
+            p.processBlock(buffer, midi);
+            p.updateFXModules();
+            expectEquals(p.getLatencySamples(), FX::oversamplingLatency(2, kBlock));
+
+            p.setFXSlotModule(kMaster1, FX::ModuleType::reverb);
+            setControl(p, kMaster1, 0, 2.0f);
+            setControl(p, kMaster1, 1, 50.0f);
+            p.setFXSlotModule(kInsertB1, FX::ModuleType::delay);
+            setControl(p, kInsertB1, 0, 100.0f);
+            setControl(p, kInsertB1, 1, 50.0f);
+            p.updateFXModules();
+            const double delayTail = 0.1 * (1.0 + std::log(0.001) / std::log(0.5));
+            expectWithinAbsoluteError(p.getTailLengthSeconds(), delayTail + 2.05, 1.0e-3);
+        }
+
+        beginTest("(f) A host block bigger than prepareToPlay announced renders exactly as if it had been announced");
+        {
+            auto renderWith = [](int prepared)
+            {
+                DOOFAudioProcessor p;
+                set(p, ParamIDs::layerType(1), (float) (int) ParamIDs::LayerType::click);
+                set(p, ParamIDs::layerRoute(1), (float) (int) FX::Route::insertA);
+                p.setFXSlotModule(kInsertA1, FX::ModuleType::filter);
+                p.setFXSlotModule(kMaster1, FX::ModuleType::compressor);
+                p.prepareToPlay(kSr, prepared);
+
+                std::vector<float> out;
+                for (int start = 0; start < 6000; start += 1000)
+                {
+                    juce::AudioBuffer<float> buffer(2, 1000);
+                    juce::MidiBuffer midi;
+                    if (start == 0)
+                        midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 700); // lands in a later chunk
+                    if (start == 2000)
+                        midi.addEvent(juce::MidiMessage::noteOn(1, 64, (juce::uint8) 100), 131);
+                    p.processBlock(buffer, midi);
+                    out.insert(out.end(), buffer.getReadPointer(0), buffer.getReadPointer(0) + 1000);
+                }
+                return out;
+            };
+
+            const auto announced = renderWith(1000);
+            const auto chunked = renderWith(128);
+            expect(identical(announced, chunked), "Chunked rendering must not change a sample");
+            expect(Phase7Fixtures::toDb(*std::max_element(announced.begin(), announced.end())) > -40.0, "...and must not be silent");
+        }
+    }
+};
+
+static Phase7ProcessorTest phase7ProcessorTest;
+
+// Phase7StateTest — state version 5: the FX section and the macro assignments survive a save and
+// reload exactly, and an older preset loads with an empty FX section.
+class Phase7StateTest : public juce::UnitTest
+{
+public:
+    Phase7StateTest() : juce::UnitTest("Phase7State") {}
+
+    void runTest() override
+    {
+        using namespace Phase7Fixtures;
+
+        auto configure = [](DOOFAudioProcessor& p)
+        {
+            set(p, ParamIDs::layerType(1), (float) (int) ParamIDs::LayerType::click);
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::both);
+            set(p, ParamIDs::layerRoute(1), (float) (int) FX::Route::insertB);
+            p.setFXSlotModule(kInsertA1 + 2, FX::ModuleType::tube);
+            setControl(p, kInsertA1 + 2, 0, 20.0f);
+            p.setFXSlotModule(kInsertB1, FX::ModuleType::eq);
+            setControl(p, kInsertB1, 2, 9.0f);
+            p.setFXSlotModule(kMaster1 + 5, FX::ModuleType::reverb);
+            set(p, ParamIDs::fxSlotMix(kMaster1 + 5), 0.2f);
+            set(p, ParamIDs::fxInsertLevel(1), 0.7f);
+            set(p, ParamIDs::fxOversampling, 2.0f);
+            set(p, ParamIDs::fxMacro(1), 0.4f);
+            p.getMacroAssignments().assign(1, kInsertA1 + 2, 0, -0.5f);
+            p.getMacroAssignments().assign(3, kMaster1 + 5, FX::kMixTarget, 0.25f);
+        };
+
+        beginTest("(a) Round trip: every FX setting and assignment restores, and the render null-matches");
+        {
+            DOOFAudioProcessor p;
+            configure(p);
+            const auto before = render(p, 0.6);
+
+            juce::MemoryBlock saved;
+            p.getStateInformation(saved);
+
+            // Change everything, then load.
+            set(p, ParamIDs::layerRoute(0), 0.0f);
+            p.setFXSlotModule(kInsertA1 + 2, FX::ModuleType::none);
+            p.setFXSlotModule(kInsertB1, FX::ModuleType::delay);
+            set(p, ParamIDs::fxOversampling, 0.0f);
+            p.getMacroAssignments().clear();
+
+            p.setStateInformation(saved.getData(), (int) saved.getSize());
+            expectEquals(juce::roundToInt(raw(p, ParamIDs::fxSlotType(kInsertA1 + 2))), (int) FX::ModuleType::tube);
+            expectEquals(juce::roundToInt(raw(p, ParamIDs::layerRoute(0))), (int) FX::Route::both);
+            expectWithinAbsoluteError(p.getMacroAssignments().getDepth(1, kInsertA1 + 2, 0), -0.5f, 1.0e-6f);
+            expectWithinAbsoluteError(p.getMacroAssignments().getDepth(3, kMaster1 + 5, FX::kMixTarget), 0.25f, 1.0e-6f);
+
+            const auto after = render(p, 0.6);
+            expect(identical(before.left, after.left) && identical(before.right, after.right), "Reloaded render differs");
+        }
+
+        beginTest("(b) A version 4 preset loads with an empty FX section, every layer Dry, and no assignments");
+        {
+            DOOFAudioProcessor pristine;
+            const auto expected = render(pristine, 0.4);
+
+            juce::MemoryBlock blob;
+            pristine.getStateInformation(blob);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(blob.getData(), (int) blob.getSize());
+            auto tree = juce::ValueTree::fromXml(*xml);
+
+            // What Phase 6 wrote: version 4, no MACROS, and no FX parameters at all.
+            tree.setProperty("version", 4, nullptr);
+            tree.removeChild(tree.getChildWithName("MACROS"), nullptr);
+            auto params = tree.getChildWithName(pristine.apvts.state.getType());
+            for (int i = params.getNumChildren(); --i >= 0;)
+            {
+                const auto id = params.getChild(i).getProperty("id").toString();
+                if (id.startsWith("fx.") || id.endsWith(".route"))
+                    params.removeChild(i, nullptr);
+            }
+            juce::MemoryBlock old;
+            juce::AudioProcessor::copyXmlToBinary(*tree.createXml(), old);
+
+            DOOFAudioProcessor p;
+            configure(p);
+            p.setStateInformation(old.getData(), (int) old.getSize());
+
+            for (int slot = 0; slot < FX::kNumSlots; ++slot)
+                expectEquals(juce::roundToInt(raw(p, ParamIDs::fxSlotType(slot))), (int) FX::ModuleType::none);
+            for (int layer = 0; layer < 5; ++layer)
+                expectEquals(juce::roundToInt(raw(p, ParamIDs::layerRoute(layer))), (int) FX::Route::dry);
+            expectEquals((int) p.getMacroAssignments().getSnapshot()->assignments.size(), 0);
+            expectEquals(juce::roundToInt(raw(p, ParamIDs::fxOversampling)), 1, "Oversampling back at its 2x default");
+
+            const auto loaded = render(p, 0.4);
+            expect(identical(expected.left, loaded.left), "Sounds exactly as Phase 6 did");
+        }
+    }
+};
+
+static Phase7StateTest phase7StateTest;
 
 // ── Test runner entry point ────────────────────────────────────────────────────
 
