@@ -777,7 +777,10 @@ void DOOFAudioProcessor::readFXParams()
     if (auto* playHead = getPlayHead())
         if (const auto position = playHead->getPosition())
             if (const auto bpm = position->getBpm(); bpm.hasValue() && *bpm > 0.0)
+            {
                 fxParams.context.bpm = *bpm;
+                hostBpm.store(*bpm, std::memory_order_relaxed);
+            }
 }
 
 // Pushes one layer's click parameters into its ClickVoice and answers which voice the layer is
@@ -1085,7 +1088,7 @@ void DOOFAudioProcessor::updateFXModules()
             values[(size_t) k] = slotParams[(size_t) slot].values[(size_t) k]->load();
 
         channelTail[(int) FX::channelOf(slot)] += FX::tailSeconds((FX::ModuleType) types[(size_t) slot], values,
-                                                                  fxParams.context.bpm);
+                                                                  hostBpm.load(std::memory_order_relaxed));
     }
 
     fxTailSeconds.store(juce::jmax(channelTail[0], channelTail[1]) + channelTail[2], std::memory_order_relaxed);

@@ -5234,6 +5234,284 @@ public:
 
 static Phase7EditorTest phase7EditorTest;
 
+
+// Phase7VerifyTest — §6's Phase 7 verify list, end to end through the real processor:
+//   - every module: bypass is a bit-identical null; engaged, the response matches spec
+//   - route only layer 2 to Insert A and solo it: only layer 2, processed, is present
+//   - assign a macro to a cutoff and sweep it: the cutoff tracks
+//   - oversampled vs not, by FFT: less aliasing oversampled
+//   - automate parameters fast: no zipper noise
+// The signal is a Sub layer held at a steady pitch and level, so responses can be read at a
+// frequency rather than off a kick's sweep.
+class Phase7VerifyTest : public juce::UnitTest
+{
+public:
+    Phase7VerifyTest() : juce::UnitTest("Phase7Verify") {}
+
+    void runTest() override
+    {
+        testBypassNulls();
+        testEngagedResponses();
+        testRoutedSolo();
+        testMacroSweep();
+        testOversampling();
+        testFastAutomation();
+    }
+
+private:
+    // Layer 1 at a steady tone, routed through Insert A.
+    static void toneThroughInsertA(DOOFAudioProcessor& p, double hz)
+    {
+        Phase7Fixtures::steadyTone(p, 0, hz);
+        Phase7Fixtures::set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::insertA);
+    }
+
+    // The tone's amplitude at hz with the given module in Insert A against the same render with the
+    // slot empty, in dB.
+    static double insertGainDb(DOOFAudioProcessor& p, double hz)
+    {
+        using namespace Phase7Fixtures;
+        const auto withModule = render(p, 0.6);
+        const int type = juce::roundToInt(raw(p, ParamIDs::fxSlotType(kInsertA1)));
+        set(p, ParamIDs::fxSlotType(kInsertA1), 0.0f);
+        const auto without = render(p, 0.6);
+        set(p, ParamIDs::fxSlotType(kInsertA1), (float) type);
+        return toDb(amplitudeAt(withModule.left, hz, 0.2, 0.6) / amplitudeAt(without.left, hz, 0.2, 0.6));
+    }
+
+    void testBypassNulls()
+    {
+        beginTest("Every module, bypassed in the processor, is a bit-identical null - and exactly one latency late when oversampled");
+        using namespace Phase7Fixtures;
+
+        for (int os : { 0, 2 })
+        {
+            DOOFAudioProcessor p;
+            set(p, ParamIDs::layerType(1), (float) (int) ParamIDs::LayerType::click);
+            set(p, ParamIDs::layerRoute(0), (float) (int) FX::Route::insertA);
+            set(p, ParamIDs::layerRoute(1), (float) (int) FX::Route::both);
+            set(p, ParamIDs::fxOversampling, (float) os);
+            const auto reference = render(p, 0.3);
+
+            for (int t = 1; t < FX::kNumModuleTypes; ++t)
+            {
+                const auto type = (FX::ModuleType) t;
+                p.setFXSlotModule(kInsertA1 + 2, type);
+                set(p, ParamIDs::fxSlotOn(kInsertA1 + 2), 0.0f);
+                const auto bypassed = render(p, 0.3);
+
+                const int latency = p.getLatencySamples();
+                const bool oversampled = os > 0 && FX::getInfo(type).oversampled;
+                expectEquals(latency, oversampled ? FX::oversamplingLatency(os, kBlock) : 0);
+                expect(identical(reference.left, bypassed.left, (size_t) latency)
+                       && identical(reference.right, bypassed.right, (size_t) latency),
+                       juce::String(FX::getInfo(type).name) + (os > 0 ? " at 4x" : " at Off") + ": not a null");
+            }
+        }
+    }
+
+    void testEngagedResponses()
+    {
+        beginTest("Engaged, each module measures to spec: the filter is -3 dB at its cutoff, the bit crusher's steps show in the waveform");
+        using namespace Phase7Fixtures;
+
+        {
+            DOOFAudioProcessor p;
+            toneThroughInsertA(p, 1000.0);
+            p.setFXSlotModule(kInsertA1, FX::ModuleType::filter);
+            setControl(p, kInsertA1, 1, 1000.0f);
+            expectWithinAbsoluteError(insertGainDb(p, 1000.0), -3.01, 0.05, "Low pass at its cutoff");
+            setControl(p, kInsertA1, 3, 1.0f); // 24 dB
+            expectWithinAbsoluteError(insertGainDb(p, 1000.0), -3.01, 0.05, "24 dB low pass at its cutoff");
+        }
+
+        {
+            // The output stage's DC blocker tilts each held step very slightly, so the steps are read
+            // from sample-to-sample differences: every one is a whole number of quantisation steps,
+            // give or take the blocker's drift (at most 0.15% of full scale per sample).
+            DOOFAudioProcessor p;
+            steadyTone(p, 0, 220.0);
+            set(p, ParamIDs::subGain, 1.0f);
+            p.setFXSlotModule(kMaster1, FX::ModuleType::bitCrusher);
+            setControl(p, kMaster1, 0, 3.0f);
+            const auto out = render(p, 0.3);
+
+            const float step = 0.25f; // 3 bits
+            int jumps = 0;
+            bool onGrid = true;
+            for (size_t i = (size_t) (0.05 * kSr); i < out.left.size(); ++i)
+            {
+                const float delta = out.left[i] - out.left[i - 1];
+                const float steps = std::round(delta / step);
+                onGrid = onGrid && std::abs(delta - steps * step) < 0.002f;
+                jumps += steps != 0.0f ? 1 : 0;
+            }
+            expect(onGrid, "A sample-to-sample change off the 3-bit grid");
+            expectGreaterThan(jumps, 200, "The steps should actually be there");
+        }
+
+        // Every module, engaged at its defaults on the tone, changes it and stays finite.
+        for (int t = 1; t < FX::kNumModuleTypes; ++t)
+        {
+            DOOFAudioProcessor p;
+            toneThroughInsertA(p, 220.0);
+            const auto dry = render(p, 0.3);
+            p.setFXSlotModule(kInsertA1, (FX::ModuleType) t);
+            if ((FX::ModuleType) t == FX::ModuleType::eq)
+                setControl(p, kInsertA1, 2, 6.0f); // a flat EQ is, correctly, an identity
+            const auto wet = render(p, 0.3);
+
+            bool finite = true;
+            for (float v : wet.left)
+                finite = finite && std::isfinite(v);
+            expect(finite, juce::String(FX::getInfo((FX::ModuleType) t).name) + " produced a non-finite sample");
+            expectGreaterThan(worstDifference(dry.left, wet.left), 1.0e-3f,
+                              juce::String(FX::getInfo((FX::ModuleType) t).name) + " changed nothing");
+        }
+    }
+
+    void testRoutedSolo()
+    {
+        beginTest("Route only layer 2 to Insert A and solo it: only layer 2's processed signal is present");
+        using namespace Phase7Fixtures;
+
+        DOOFAudioProcessor p;
+        set(p, ParamIDs::layerType(1), (float) (int) ParamIDs::LayerType::click);
+        set(p, ParamIDs::layerClickType(1), (float) (int) ParamIDs::ClickType::noise);
+        set(p, ParamIDs::layerSolo(1), 1.0f);
+
+        // Reference: layer 2 alone, unprocessed, then run through the same filter offline. The filter
+        // is linear and time-invariant, so it commutes with the output stage's gain and DC blocker.
+        const auto layer2Dry = render(p, 0.3);
+
+        set(p, ParamIDs::layerRoute(1), (float) (int) FX::Route::insertA);
+        p.setFXSlotModule(kInsertA1, FX::ModuleType::filter);
+        setControl(p, kInsertA1, 1, 800.0f);
+        const auto routed = render(p, 0.3);
+        const auto expected = processOffline(FX::ModuleType::filter, slotValues(p, kInsertA1), layer2Dry.left);
+
+        expectLessThan(worstDifference(expected, routed.left), 1.0e-5f);
+        expectGreaterThan(worstDifference(layer2Dry.left, routed.left), 0.05f, "...and it is processed");
+
+        // Unsoloed, layer 1 (Dry) adds back in, unprocessed.
+        set(p, ParamIDs::layerSolo(1), 0.0f);
+        const auto both = render(p, 0.3);
+        set(p, ParamIDs::layerSolo(0), 1.0f);
+        const auto layer1 = render(p, 0.3);
+        std::vector<float> sum(both.left.size());
+        for (size_t i = 0; i < sum.size(); ++i)
+            sum[i] = layer1.left[i] + expected[i];
+        expectLessThan(worstDifference(sum, both.left), 1.0e-5f);
+    }
+
+    void testMacroSweep()
+    {
+        beginTest("A macro assigned to a cutoff and swept: the cutoff tracks, measured at a fixed tone");
+        using namespace Phase7Fixtures;
+
+        DOOFAudioProcessor p;
+        toneThroughInsertA(p, 2000.0);
+        p.setFXSlotModule(kInsertA1, FX::ModuleType::filter);
+        set(p, ParamIDs::fxSlotParam(kInsertA1, 1), 0.0f); // the base cutoff at its 20 Hz bottom
+        p.getMacroAssignments().assign(0, kInsertA1, 1, 1.0f);
+
+        const auto& cutoffSpec = FX::getInfo(FX::ModuleType::filter).params[1];
+        for (float target : { 1000.0f, 2000.0f, 5000.0f })
+        {
+            const float macro = FX::toNormalised(cutoffSpec, target);
+            set(p, ParamIDs::fxMacro(0), macro);
+
+            // The bilinear transform's warping, so the expectation is the filter's exact digital response.
+            const double ratio = std::tan(juce::MathConstants<double>::pi * 2000.0 / kSr)
+                               / std::tan(juce::MathConstants<double>::pi * target / kSr);
+            const double expectedDb = -10.0 * std::log10(1.0 + std::pow(ratio, 4.0));
+
+            const double measured = insertGainDb(p, 2000.0);
+            expectWithinAbsoluteError(measured, expectedDb, 0.05,
+                                      "Macro " + juce::String(macro, 3) + " should put the cutoff at " + juce::String(target) + " Hz");
+            expectWithinAbsoluteError(p.getFXEngine().getEffectiveValue(kInsertA1, 1), macro, 1.0e-6f);
+        }
+    }
+
+    // Off-harmonic power against the total, in dB (the FX unit tests' measure).
+    static double aliasDb(const std::vector<float>& x, double hz)
+    {
+        constexpr int order = 15, size = 1 << order;
+        juce::dsp::FFT fft(order);
+        std::vector<float> data((size_t) size * 2, 0.0f);
+        const size_t start = x.size() - (size_t) size;
+        for (int i = 0; i < size; ++i)
+        {
+            const double t = juce::MathConstants<double>::twoPi * i / (size - 1);
+            data[(size_t) i] = x[start + (size_t) i]
+                             * (float) (0.35875 - 0.48829 * std::cos(t) + 0.14128 * std::cos(2.0 * t) - 0.01168 * std::cos(3.0 * t));
+        }
+        fft.performFrequencyOnlyForwardTransform(data.data());
+
+        double harmonic = 0.0, alias = 0.0;
+        for (int bin = 2; bin < size / 2; ++bin)
+        {
+            const double freq = bin * Phase7Fixtures::kSr / size;
+            const double nearest = std::round(freq / hz) * hz;
+            const double power = (double) data[(size_t) bin] * data[(size_t) bin];
+            (std::abs(freq - nearest) < 6.0 * Phase7Fixtures::kSr / size ? harmonic : alias) += power;
+        }
+        return 10.0 * std::log10(alias / (harmonic + alias));
+    }
+
+    void testOversampling()
+    {
+        beginTest("Distortion oversampled vs not, by FFT through the processor: less aliasing oversampled");
+        using namespace Phase7Fixtures;
+
+        auto measure = [](int os)
+        {
+            DOOFAudioProcessor p;
+            toneThroughInsertA(p, 3123.0);
+            p.setFXSlotModule(kInsertA1, FX::ModuleType::clip);
+            setControl(p, kInsertA1, 0, 30.0f);
+            setControl(p, kInsertA1, 2, 0.0f);
+            set(p, ParamIDs::fxOversampling, (float) os);
+            return aliasDb(render(p, 1.0).left, 3123.0);
+        };
+
+        const double off = measure(0), four = measure(2);
+        logMessage("Hard clip on a 3123 Hz tone, alias power: Off " + juce::String(off, 1) + " dB, 4x " + juce::String(four, 1) + " dB");
+        expectLessThan(four, off - 15.0);
+    }
+
+    void testFastAutomation()
+    {
+        beginTest("Automating a module's output, an insert level and a macro every block: no zipper noise");
+        using namespace Phase7Fixtures;
+
+        DOOFAudioProcessor p;
+        toneThroughInsertA(p, 100.0);
+        p.setFXSlotModule(kInsertA1, FX::ModuleType::clip);
+        setControl(p, kInsertA1, 0, 0.0f);
+        setControl(p, kInsertA1, 2, 100.0f);
+        p.getMacroAssignments().assign(0, kInsertA1, FX::kMixTarget, -1.0f);
+
+        const auto& outputSpec = FX::getInfo(FX::ModuleType::clip).params[4];
+        const auto out = render(p, 1.0, 64, [&](int block)
+        {
+            const bool up = (block % 2) == 0;
+            set(p, ParamIDs::fxSlotParam(kInsertA1, 4), FX::toNormalised(outputSpec, up ? 6.0f : -12.0f));
+            set(p, ParamIDs::fxInsertLevel(0), up ? 1.0f : 0.2f);
+            set(p, ParamIDs::fxMacro(0), up ? 0.0f : 0.8f);
+        });
+
+        // A 100 Hz tone at this level moves at most ~0.03 a sample; an unsmoothed step in any of
+        // the three would jump by an order of magnitude more.
+        float worst = 0.0f;
+        for (size_t i = (size_t) (0.1 * kSr); i < out.left.size(); ++i)
+            worst = std::max(worst, std::abs(out.left[i] - out.left[i - 1]));
+        expectLessThan(worst, 0.04f);
+    }
+};
+
+static Phase7VerifyTest phase7VerifyTest;
+
 // ── Test runner entry point ────────────────────────────────────────────────────
 
 int main()

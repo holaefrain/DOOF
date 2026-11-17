@@ -248,6 +248,9 @@ private:
     // Kept current by updateFXModules, read by getTailLengthSeconds from any thread.
     std::atomic<double> fxTailSeconds { 0.0 };
 
+    // The host's tempo as the audio thread last read it, for the message thread's tail estimate.
+    std::atomic<double> hostBpm { 120.0 };
+
     // Each layer's route for the current block, resolved once per block like layerSource.
     std::array<FX::Route, LayerAudibility::kNumLayers> layerRoute {};
     // Which of a layer's two voices its output is taken from for the current block.
