@@ -148,7 +148,7 @@ All figures in dB. Oversampling latency per module at 44.1 kHz: 2x 49, 4x 61, 8x
 
 About 37 deliberate breaks across the steps each failed the test aimed at it. 201 subtests across both binaries (110 + 91), 0 failures. All four targets build with zero compiler warnings.
 
-**Still outstanding:** your hands-on check of Phase 7 in Live, then Phase 7 can be marked complete. The VST3 installed in `/Volumes/External SSD/Ableton/VST3 Plug-In` is the Phase 6 build and needs reinstalling for that.
+**Still outstanding:** your hands-on check of Phase 7 in Live, then Phase 7 can be marked complete. The Phase 7 Release build was installed in `/Volumes/External SSD/Ableton/VST3 Plug-In` on 2026-11-20 (built from `35bbe56`; signature verifies).
 
 **Next steps:** Phase 8 — EQ + spectral analyzer.
 
